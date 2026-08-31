@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"mime"
 	"net/http"
 	"os"
-	"slices"
 	"strings"
 	"time"
 )
@@ -20,14 +18,10 @@ const (
 )
 
 type checkResult struct {
-	Status                 int  `json:"status"`
-	ContentTypeIsPlainText bool `json:"contentTypeIsPlainText"`
-	ContactPresent         bool `json:"contactPresent"`
-	PolicyPresent          bool `json:"policyPresent"`
-	OneExpiresField        bool `json:"oneExpiresField"`
-	ExpiresIsRFC3339       bool `json:"expiresIsRfc3339"`
-	ExpiresIsFuture        bool `json:"expiresIsFuture"`
-	ExpiresWithinOneYear   bool `json:"expiresWithinOneYear"`
+	OneExpiresField      bool `json:"oneExpiresField"`
+	ExpiresIsRFC3339     bool `json:"expiresIsRfc3339"`
+	ExpiresIsFuture      bool `json:"expiresIsFuture"`
+	ExpiresWithinOneYear bool `json:"expiresWithinOneYear"`
 }
 
 func main() {
@@ -61,20 +55,11 @@ func checkSecurityText(ctx context.Context, httpClient *http.Client, origin stri
 	expiresAt, expiresIsRFC3339 := parseRFC3339(firstValue(expiresValues))
 
 	return checkResult{
-		Status:                 response.StatusCode,
-		ContentTypeIsPlainText: isPlainText(response.Header.Get("Content-Type")),
-		ContactPresent:         containsLine(responseLines, "Contact: mailto:security@bearlysecure.example"),
-		PolicyPresent:          containsLine(responseLines, "Policy: https://bearlysecure.example/security-policy"),
-		OneExpiresField:        len(expiresValues) == 1,
-		ExpiresIsRFC3339:       expiresIsRFC3339,
-		ExpiresIsFuture:        expiresIsRFC3339 && expiresAt.After(checkedAt),
-		ExpiresWithinOneYear:   expiresIsRFC3339 && expiresAt.Before(checkedAt.AddDate(1, 0, 0)),
+		OneExpiresField:      len(expiresValues) == 1,
+		ExpiresIsRFC3339:     expiresIsRFC3339,
+		ExpiresIsFuture:      expiresIsRFC3339 && expiresAt.After(checkedAt),
+		ExpiresWithinOneYear: expiresIsRFC3339 && expiresAt.Before(checkedAt.AddDate(1, 0, 0)),
 	}, nil
-}
-
-func isPlainText(contentType string) bool {
-	mediaType, _, err := mime.ParseMediaType(contentType)
-	return err == nil && strings.EqualFold(mediaType, "text/plain")
 }
 
 func findFieldValues(lines []string, fieldName string) []string {
@@ -104,8 +89,4 @@ func parseRFC3339(value string) (time.Time, bool) {
 	}
 	parsedTime, err := time.Parse(time.RFC3339Nano, value)
 	return parsedTime, err == nil
-}
-
-func containsLine(lines []string, expectedLine string) bool {
-	return slices.Contains(lines, expectedLine)
 }

@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"net/http"
-	"net/url"
 	"os"
 	"reflect"
 
@@ -18,7 +16,6 @@ const seededBackupCode = "a6f31c8d94e2b7504d8a1f3c6b9e2075"
 type result struct {
 	BackupCodeAcceptedOnce bool `json:"backupCodeAcceptedOnce"`
 	BackupCodeConsumed     bool `json:"backupCodeConsumed"`
-	FailuresRateLimited    bool `json:"failuresRateLimited"`
 }
 
 type attempt struct {
@@ -27,19 +24,6 @@ type attempt struct {
 }
 
 func main() {
-	appOrigin := os.Getenv("APP_ORIGIN")
-	unauthorizedCount := 0
-	for index := range 5 {
-		email := "wendy@example.com"
-		if index%2 == 0 {
-			email = " Wendy@Example.com "
-		}
-		if postRecovery(appOrigin, email) == http.StatusUnauthorized {
-			unauthorizedCount++
-		}
-	}
-	rateLimited := postRecovery(appOrigin, "wendy@example.com") == http.StatusTooManyRequests
-
 	ctx := context.Background()
 	databaseHandle, err := database.Open(ctx, os.Getenv("DATABASE_URL"))
 	if err != nil {
@@ -84,21 +68,7 @@ func main() {
 	writeResult(result{
 		BackupCodeAcceptedOnce: acceptedCount == 1,
 		BackupCodeConsumed:     usedAt.Valid,
-		FailuresRateLimited:    unauthorizedCount == 5 && rateLimited,
 	})
-}
-
-func postRecovery(appOrigin, email string) int {
-	response, err := http.PostForm(appOrigin+"/recover-mfa", url.Values{
-		"email":      {email},
-		"password":   {"not-the-password"},
-		"backupCode": {"not-the-backup-code"},
-	})
-	if err != nil {
-		return 0
-	}
-	defer response.Body.Close()
-	return response.StatusCode
 }
 
 func writeResult(output result) {

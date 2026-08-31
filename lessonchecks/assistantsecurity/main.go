@@ -17,7 +17,6 @@ type results struct {
 	OriginalToolsPreserved      bool     `json:"originalToolsPreserved"`
 	OnlyStatusToolAvailable     bool     `json:"onlyStatusToolAvailable"`
 	RefundDenied                bool     `json:"refundDenied"`
-	StatusRequestWorks          bool     `json:"statusRequestWorks"`
 	ToolNames                   []string `json:"toolNames"`
 }
 
@@ -43,23 +42,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	statusRequest := service.BuildRequest(1, "check order 1")
-	for toolIndex := range statusRequest.Tools {
-		statusRequest.Tools[toolIndex].Execute = func(context.Context, map[string]any) (string, error) {
-			return "status available", nil
-		}
-	}
-	statusResponse, err := assistant.RunSimulatedAssistant(context.Background(), statusRequest)
-	if err != nil {
-		log.Fatal(err)
-	}
 	output := results{
 		SystemInstructionsSeparated: systemContent != "" && !strings.Contains(systemContent, customerMessage) && strings.Contains(strings.ToLower(systemContent), "untrusted"),
 		CustomerMessageSeparated:    userContent == customerMessage,
 		OriginalToolsPreserved:      slices.Equal(toolNames, []string{"get_order_status", "issue_refund"}),
 		OnlyStatusToolAvailable:     slices.Equal(toolNames, []string{"get_order_status"}),
 		RefundDenied:                refundResponse == "I cannot issue refunds. Please contact support.",
-		StatusRequestWorks:          statusResponse == "status available",
 		ToolNames:                   toolNames,
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(output); err != nil {

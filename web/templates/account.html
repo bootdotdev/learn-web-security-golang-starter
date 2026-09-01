@@ -11,9 +11,9 @@
 <p class="eyebrow">Account</p>
 <h1 class="profile-heading">Your Profile</h1>
 <div class="form-message profile-message" aria-live="polite">
-  {{if .Error}}
+  {{- if .Error}}
   <p class="error">{{.Error}}</p>
-  {{end}}
+  {{end -}}
 </div>
 <section class="card-grid">
   <article class="card">

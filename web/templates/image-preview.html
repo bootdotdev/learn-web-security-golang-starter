@@ -18,9 +18,9 @@
       required /></label
   ><button type="submit">Fetch preview</button>
   <div class="form-message" aria-live="polite">
-    {{if .Error}}
+    {{- if .Error}}
     <p class="error">{{.Error}}</p>
-    {{end}}
+    {{end -}}
   </div>
 </form>
 {{if .Preview}}

@@ -11,9 +11,9 @@
   class="form-message auth-message"
   aria-live="polite"
 >
-  {{if .Error}}
+  {{- if .Error}}
   <p class="error">{{.Error}}</p>
-  {{end}}
+  {{end -}}
 </div>
 <div class="page-action">
   <button id="passkey-login-btn" data-return-to="{{.ReturnTo}}">
@@ -59,9 +59,9 @@
 <div class="page-action">
   <button id="passkey-register-btn">Register new passkey</button>
   <div id="passkey-register-message" class="form-message" aria-live="polite">
-    {{if .Error}}
+    {{- if .Error}}
     <p class="error">{{.Error}}</p>
-    {{end}}
+    {{end -}}
   </div>
 </div>
 <script src="/vendor/simplewebauthn/index.umd.min.js"></script>

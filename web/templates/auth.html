@@ -4,9 +4,9 @@
 </nav>
 <h1 class="auth-heading">Log In</h1>
 <div class="form-message auth-message" aria-live="polite">
-  {{if .Error}}
+  {{- if .Error}}
   <p class="error">{{.Error}}</p>
-  {{end}}
+  {{end -}}
 </div>
 <form method="post" action="/login" class="auth-form">
   <input name="returnTo" type="hidden" value="{{.ReturnTo}}" />
@@ -45,9 +45,9 @@
 </nav>
 <h1 class="auth-heading">Create Account</h1>
 <div class="form-message auth-message" aria-live="polite">
-  {{if .Error}}
+  {{- if .Error}}
   <p class="error">{{.Error}}</p>
-  {{end}}
+  {{end -}}
 </div>
 <form method="post" action="/signup" class="auth-form">
   <label
@@ -88,9 +88,9 @@
 <h1 class="auth-heading">Two-Step Verification</h1>
 <p class="subtitle">Enter the 6-digit code from your authenticator app.</p>
 <div class="form-message auth-message" aria-live="polite">
-  {{if .Error}}
+  {{- if .Error}}
   <p class="error">{{.Error}}</p>
-  {{end}}
+  {{end -}}
 </div>
 <form method="post" action="/login/totp" class="auth-form">
   <input name="returnTo" type="hidden" value="{{.ReturnTo}}" />
@@ -120,9 +120,9 @@
   remaining codes.
 </p>
 <div class="form-message auth-message" aria-live="polite">
-  {{if .Error}}
+  {{- if .Error}}
   <p class="error">{{.Error}}</p>
-  {{end}}
+  {{end -}}
 </div>
 <form method="post" action="/recover-mfa" class="auth-form">
   <label
@@ -161,13 +161,13 @@
   Enter your email address and Bear Mail will send a reset link.
 </p>
 <div class="form-message auth-message" aria-live="polite">
-  {{if .Error}}
+  {{- if .Error}}
   <p class="error">{{.Error}}</p>
   {{end}}{{if .ShowConfirmation}}
   <p class="confirmation">
     Starter reset link: <a href="{{.ResetLink}}">{{.ResetLink}}</a>
   </p>
-  {{end}}
+  {{end -}}
 </div>
 <form method="post" action="/password-reset" class="auth-form">
   <label
@@ -188,9 +188,9 @@
 </nav>
 <h1 class="auth-heading">Choose New Password</h1>
 <div class="form-message auth-message" aria-live="polite">
-  {{if .Error}}
+  {{- if .Error}}
   <p class="error">{{.Error}}</p>
-  {{end}}
+  {{end -}}
 </div>
 <form
   method="post"

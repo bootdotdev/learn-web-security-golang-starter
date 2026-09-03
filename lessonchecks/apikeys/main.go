@@ -20,7 +20,11 @@ type result struct {
 
 func main() {
 	ctx := context.Background()
-	databaseHandle, err := database.Open(ctx, os.Getenv("DATABASE_URL"))
+	databasePath := os.Getenv("DATABASE_URL")
+	if databasePath == "" {
+		databasePath = "data/bearly-secure.sqlite"
+	}
+	databaseHandle, err := database.Open(ctx, databasePath)
 	if err != nil {
 		_ = json.NewEncoder(os.Stdout).Encode(result{})
 		return

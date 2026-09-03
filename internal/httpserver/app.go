@@ -1,6 +1,8 @@
 package httpserver
 
 import (
+	"context"
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -20,9 +22,11 @@ import (
 	"github.com/bootdotdev/learn-web-security/internal/checkout"
 	"github.com/bootdotdev/learn-web-security/internal/httpx"
 	"github.com/bootdotdev/learn-web-security/internal/imagepreview"
+	"github.com/bootdotdev/learn-web-security/internal/integrations/pawpal"
 	"github.com/bootdotdev/learn-web-security/internal/logging"
 	"github.com/bootdotdev/learn-web-security/internal/orders"
 	"github.com/bootdotdev/learn-web-security/internal/reviews"
+	"github.com/bootdotdev/learn-web-security/internal/storage"
 	"github.com/bootdotdev/learn-web-security/internal/storefront"
 	"github.com/bootdotdev/learn-web-security/internal/support"
 	"github.com/bootdotdev/learn-web-security/internal/templates"
@@ -41,7 +45,9 @@ type Options struct {
 	MaxUploadBytes          int64
 	PawPalAPIKey            string
 	AcornFulfillmentDelay   time.Duration
+	EncryptionKeyring       *storage.Keyring
 	DataDirectory           string
+	FixtureDirectory        string
 	TemplateDirectory       string
 	PublicDirectory         string
 }
@@ -55,10 +61,16 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 	if options.DataDirectory == "" {
 		return nil, fmt.Errorf("data directory is required")
 	}
+	if options.FixtureDirectory == "" {
+		options.FixtureDirectory = filepath.Join(options.DataDirectory, "fixtures")
+	}
 	if options.MaxUploadBytes <= 0 {
 		return nil, fmt.Errorf("maximum upload size must be positive")
 	}
 	uploadDirectory := filepath.Join(options.DataDirectory, "uploads")
+	if err := storage.MigrateSensitiveDataAtRest(context.Background(), database, options.EncryptionKeyring, uploadDirectory, filepath.Join(options.DataDirectory, "bulk-tax-documents"), options.FixtureDirectory); err != nil {
+		return nil, err
+	}
 	renderer, err := templates.Load(options.TemplateDirectory)
 	if err != nil {
 		return nil, err
@@ -69,7 +81,7 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 	}
 
 	accountStore := accounts.NewStore(database)
-	mfaStore := mfa.NewStore(database)
+	mfaStore := mfa.NewStore(database, options.EncryptionKeyring)
 	passwordResetStore := passwordreset.NewStore(database)
 	uploadStore := uploads.NewStore(database)
 	accountHandler := account.NewHandler(accountStore, mfaStore, renderer, logger)
@@ -77,7 +89,8 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 	cartHandler := cart.NewHandler(cartStore, accountStore, renderer, logger)
 	orderStore := orders.NewStore(database)
 	orderHandler := orders.NewHandler(orderStore, accountStore, renderer, logger)
-	checkoutHandler := checkout.NewHandler(cartStore, orderStore, accountStore, renderer, logger, options.PawPalAPIKey, options.AcornFulfillmentDelay)
+	checkoutHandler := checkout.NewHandler(cartStore, orderStore, accountStore, options.EncryptionKeyring, renderer, logger, options.AcornFulfillmentDelay)
+	pawPalHandler := pawpal.NewHandler(orderStore, logger, options.PawPalAPIKey)
 	reviewHandler := reviews.NewHandler(reviews.NewStore(database), accountStore, renderer, logger)
 	productStore := storefront.NewStore(database)
 	storefrontHandler := storefront.NewHandler(
@@ -87,16 +100,22 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 		logger,
 		unboundedPublicProductResults,
 	)
+	var downloadSigningKey [32]byte
+	if _, err := rand.Read(downloadSigningKey[:]); err != nil {
+		return nil, fmt.Errorf("generate download signing key: %w", err)
+	}
 	uploadHandler := uploads.NewHandler(
 		accountStore,
 		uploadStore,
 		renderer,
 		logger,
+		options.EncryptionKeyring,
 		uploadDirectory,
 		defaultUploadBytes,
+		downloadSigningKey,
 	)
 	adminHandler := admin.NewHandler(admin.NewStore(database), accountStore, renderer, logger, imagepreview.NewService(), options.MaxUploadBytes)
-	apiHandler := api.NewHandler(accountStore, orderStore, productStore, logger, unboundedPublicProductResults)
+	apiHandler := api.NewHandler(accountStore, orderStore, productStore, api.NewStore(database), logger, unboundedPublicProductResults)
 	assistantHandler := assistant.NewHandler(accountStore, assistant.NewService(orderStore), renderer, logger)
 	supportHandler := support.NewHandler(
 		accountStore,
@@ -104,6 +123,7 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 		uploadStore,
 		renderer,
 		logger,
+		options.EncryptionKeyring,
 		filepath.Join(options.DataDirectory, "bulk-tax-documents"),
 		defaultUploadBytes,
 	)
@@ -127,6 +147,7 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 	dynamicMux.HandleFunc("GET /api/account/orders", apiHandler.AccountOrders)
 	dynamicMux.HandleFunc("GET /api/orders/{id}", apiHandler.Order)
 	dynamicMux.HandleFunc("GET /api/products", apiHandler.Products)
+	dynamicMux.HandleFunc("GET /api/integrations/warehouse/orders", apiHandler.WarehouseOrders)
 	dynamicMux.Handle("POST /products/{id}/reviews", parseForm(options.MaxRequestBodyBytes, renderer)(http.HandlerFunc(reviewHandler.Create)))
 	dynamicMux.HandleFunc("GET /login", authenticationHandler.LoginPage)
 	dynamicMux.Handle("POST /login", parseForm(options.MaxRequestBodyBytes, renderer)(http.HandlerFunc(authenticationHandler.Login)))
@@ -171,6 +192,7 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 	dynamicMux.HandleFunc("GET /account/orders", orderHandler.List)
 	dynamicMux.HandleFunc("GET /orders/{id}", orderHandler.Detail)
 	dynamicMux.HandleFunc("GET /files/{id}/download", uploadHandler.Download)
+	dynamicMux.HandleFunc("GET /files/{id}/signed-download", uploadHandler.SignedDownload)
 	dynamicMux.HandleFunc("GET /support/files/imports/{id}/download", uploadHandler.ImportedDownload)
 	dynamicMux.HandleFunc("GET /support", supportHandler.Dashboard)
 	dynamicMux.HandleFunc("GET /support/orders", supportHandler.ListOrders)
@@ -208,10 +230,12 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 	mainMux.Handle("GET /shipping-widget.html", staticHandler)
 	mainMux.Handle("GET /shipping-widget.js", staticHandler)
 	mainMux.Handle("GET /product-photos/{filename}", staticHandler)
+	mainMux.HandleFunc("POST /integrations/pawpal/webhook", pawPalHandler.Webhook)
 	mainMux.Handle("/", dynamicHandler)
 
 	handler := applyMiddleware(
 		mainMux,
+		cspNonce,
 		recoverPanics(logger, renderer),
 	)
 	return &Application{Handler: handler, publicRoot: publicRoot}, nil

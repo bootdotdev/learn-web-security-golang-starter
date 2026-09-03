@@ -52,8 +52,6 @@ type Order struct {
 	TotalCents               int64   `json:"total_cents"`
 	AdminNotes               string  `json:"admin_notes"`
 	ShippingDetailsEncrypted *string `json:"shipping_details_encrypted"`
-	PaymentReference         *string `json:"payment_reference"`
-	PaymentStatus            *string `json:"payment_status"`
 	CreatedAt                string  `json:"created_at"`
 }
 

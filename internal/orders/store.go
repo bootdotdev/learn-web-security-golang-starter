@@ -8,6 +8,7 @@ import (
 
 	"github.com/bootdotdev/learn-web-security/internal/cart"
 	"github.com/bootdotdev/learn-web-security/internal/database/dbgen"
+	"github.com/bootdotdev/learn-web-security/internal/storage"
 )
 
 var ErrInsufficientInventory = errors.New("one or more cart items are no longer available in the requested quantity")
@@ -15,14 +16,15 @@ var ErrInsufficientInventory = errors.New("one or more cart items are no longer 
 const InsufficientInventoryMessage = "One or more cart items are no longer available in the requested quantity."
 
 type Order struct {
-	ID            int64
-	UserID        int64
-	CustomerName  string
-	CustomerEmail string
-	Status        string
-	TotalCents    int64
-	AdminNotes    string
-	CreatedAt     string
+	ID                       int64
+	UserID                   int64
+	CustomerName             string
+	CustomerEmail            string
+	Status                   string
+	TotalCents               int64
+	AdminNotes               string
+	ShippingDetailsEncrypted *string
+	CreatedAt                string
 }
 
 type Item struct {
@@ -43,7 +45,11 @@ func NewStore(database *sql.DB) *Store {
 	return &Store{database: database, queries: dbgen.New(database)}
 }
 
-func (store *Store) CreateFromCart(ctx context.Context, userID int64, cartItems []cart.Item, discountCents int64, adminNotes string) (Order, error) {
+func (store *Store) CreateFromCart(ctx context.Context, userID int64, cartItems []cart.Item, discountCents int64, shippingDetails ShippingDetails, adminNotes string, keyring *storage.Keyring) (Order, error) {
+	encryptedShippingDetails, err := EncryptShippingDetails(shippingDetails, keyring)
+	if err != nil {
+		return Order{}, err
+	}
 	var totalCents int64
 	for _, cartItem := range cartItems {
 		totalCents += cartItem.LineTotalCents
@@ -56,9 +62,10 @@ func (store *Store) CreateFromCart(ctx context.Context, userID int64, cartItems 
 	defer transaction.Rollback()
 	queries := store.queries.WithTx(transaction)
 	orderID, err := queries.CreateOrder(ctx, dbgen.CreateOrderParams{
-		UserID:     userID,
-		TotalCents: totalCents,
-		AdminNotes: adminNotes,
+		UserID:                   userID,
+		TotalCents:               totalCents,
+		AdminNotes:               adminNotes,
+		ShippingDetailsEncrypted: &encryptedShippingDetails,
 	})
 	if err != nil {
 		return Order{}, fmt.Errorf("create order: %w", err)
@@ -123,14 +130,15 @@ func (store *Store) ListAll(ctx context.Context) ([]Order, error) {
 	orders := make([]Order, 0, len(rows))
 	for _, row := range rows {
 		orders = append(orders, Order{
-			ID:            row.ID,
-			UserID:        row.UserID,
-			CustomerName:  row.CustomerName,
-			CustomerEmail: row.CustomerEmail,
-			Status:        row.Status,
-			TotalCents:    row.TotalCents,
-			AdminNotes:    row.AdminNotes,
-			CreatedAt:     row.CreatedAt,
+			ID:                       row.ID,
+			UserID:                   row.UserID,
+			CustomerName:             row.CustomerName,
+			CustomerEmail:            row.CustomerEmail,
+			Status:                   row.Status,
+			TotalCents:               row.TotalCents,
+			AdminNotes:               row.AdminNotes,
+			ShippingDetailsEncrypted: row.ShippingDetailsEncrypted,
+			CreatedAt:                row.CreatedAt,
 		})
 	}
 	return orders, nil
@@ -138,6 +146,14 @@ func (store *Store) ListAll(ctx context.Context) ([]Order, error) {
 
 func (store *Store) FindByID(ctx context.Context, orderID int64) (Order, bool, error) {
 	return findByID(ctx, store.queries, orderID)
+}
+
+func (store *Store) ApprovePawPalOrder(ctx context.Context, orderID int64) (bool, error) {
+	rowsAffected, err := store.queries.ApprovePawPalOrder(ctx, orderID)
+	if err != nil {
+		return false, fmt.Errorf("approve PawPal order: %w", err)
+	}
+	return rowsAffected == 1, nil
 }
 
 func (store *Store) ListItems(ctx context.Context, orderID int64) ([]Item, error) {
@@ -172,26 +188,28 @@ func findByID(ctx context.Context, queries *dbgen.Queries, orderID int64) (Order
 
 func mapListOrder(row dbgen.ListOrdersForUserRow) Order {
 	return Order{
-		ID:            row.ID,
-		UserID:        row.UserID,
-		CustomerName:  row.CustomerName,
-		CustomerEmail: row.CustomerEmail,
-		Status:        row.Status,
-		TotalCents:    row.TotalCents,
-		AdminNotes:    row.AdminNotes,
-		CreatedAt:     row.CreatedAt,
+		ID:                       row.ID,
+		UserID:                   row.UserID,
+		CustomerName:             row.CustomerName,
+		CustomerEmail:            row.CustomerEmail,
+		Status:                   row.Status,
+		TotalCents:               row.TotalCents,
+		AdminNotes:               row.AdminNotes,
+		ShippingDetailsEncrypted: row.ShippingDetailsEncrypted,
+		CreatedAt:                row.CreatedAt,
 	}
 }
 
 func mapOrder(row dbgen.GetOrderByIDRow) Order {
 	return Order{
-		ID:            row.ID,
-		UserID:        row.UserID,
-		CustomerName:  row.CustomerName,
-		CustomerEmail: row.CustomerEmail,
-		Status:        row.Status,
-		TotalCents:    row.TotalCents,
-		AdminNotes:    row.AdminNotes,
-		CreatedAt:     row.CreatedAt,
+		ID:                       row.ID,
+		UserID:                   row.UserID,
+		CustomerName:             row.CustomerName,
+		CustomerEmail:            row.CustomerEmail,
+		Status:                   row.Status,
+		TotalCents:               row.TotalCents,
+		AdminNotes:               row.AdminNotes,
+		ShippingDetailsEncrypted: row.ShippingDetailsEncrypted,
+		CreatedAt:                row.CreatedAt,
 	}
 }

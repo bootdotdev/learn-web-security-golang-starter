@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -17,6 +18,10 @@ import (
 const defaultSessionTTL = 30 * 24 * time.Hour
 
 var ErrEmailExists = errors.New("an account already exists for that email")
+
+func NormalizeEmail(email string) string {
+	return email
+}
 
 type User struct {
 	ID             int64
@@ -32,6 +37,7 @@ type User struct {
 
 type Session struct {
 	UserID              int64
+	CSRFToken           string
 	ExpiresAt           time.Time
 	RevokedAt           *string
 	LastAuthenticatedAt string
@@ -143,12 +149,18 @@ func (store *Store) CreateSession(ctx context.Context, userID int64) (Session, e
 	if _, err := io.ReadFull(store.random, tokenBytes); err != nil {
 		return Session{}, fmt.Errorf("generate session token: %w", err)
 	}
+	csrfBytes := make([]byte, 32)
+	if _, err := io.ReadFull(store.random, csrfBytes); err != nil {
+		return Session{}, fmt.Errorf("generate CSRF token: %w", err)
+	}
+
 	token := hex.EncodeToString(tokenBytes)
+	csrfToken := base64.RawURLEncoding.EncodeToString(csrfBytes)
 	nowISO := formatTimestamp(now)
 	if err := store.queries.CreateSession(ctx, dbgen.CreateSessionParams{
 		TokenHash:           HashSessionToken(token),
 		UserID:              userID,
-		CsrfToken:           "",
+		CsrfToken:           csrfToken,
 		ExpiresAt:           formatTimestamp(expiresAt),
 		LastAuthenticatedAt: nowISO,
 		CreatedAt:           nowISO,
@@ -157,6 +169,7 @@ func (store *Store) CreateSession(ctx context.Context, userID int64) (Session, e
 	}
 	return Session{
 		UserID:              userID,
+		CSRFToken:           csrfToken,
 		ExpiresAt:           expiresAt,
 		LastAuthenticatedAt: nowISO,
 		CreatedAt:           nowISO,
@@ -186,6 +199,7 @@ func (store *Store) CurrentSession(ctx context.Context, token string) (CurrentSe
 	return CurrentSession{
 		Session: Session{
 			UserID:              row.UserID,
+			CSRFToken:           row.CsrfToken,
 			ExpiresAt:           expiresAt,
 			RevokedAt:           row.RevokedAt,
 			LastAuthenticatedAt: row.LastAuthenticatedAt,

@@ -38,6 +38,11 @@
     </p>
     {{else}}
     <form method="post" action="/cart/items" class="cart-form">
+      {{if .Current}}<input
+        name="csrfToken"
+        type="hidden"
+        value="{{.Current.CSRFToken}}"
+      />{{end}}
       <input name="productId" type="hidden" value="{{.Product.ID}}" />
       <label
         >Quantity
@@ -94,6 +99,7 @@
       action="/products/{{.Product.ID}}/reviews"
       class="review-form"
     >
+      <input name="csrfToken" type="hidden" value="{{.Current.CSRFToken}}" />
       <h2>Write a Review</h2>
       <label
         >Rating

@@ -41,7 +41,7 @@
   action="/account/reviews/{{.Review.ID}}"
   class="review-form"
 >
-  <label
+  <input name="csrfToken" type="hidden" value="{{.CSRFToken}}" /><label
     >Rating<select name="rating" required>
       <option value="5" {{if eq .Review.Rating 5}}selected{{end}}>
         5 stars
@@ -69,6 +69,11 @@
   action="/account/reviews/{{.Review.ID}}/delete"
   class="delete-form"
 >
-  <button type="submit" class="danger-link">Delete review</button>
+  <input name="csrfToken" type="hidden" value="{{.CSRFToken}}" /><button
+    type="submit"
+    class="danger-link"
+  >
+    Delete review
+  </button>
 </form>
 {{template "document-end" .}}{{end}}

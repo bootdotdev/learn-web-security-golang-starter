@@ -184,12 +184,12 @@ func checkAuthenticationObservability(ctx context.Context, origin string) (check
 		RequestIDsGlobal:          validUniqueRequestIDs(requestIDs),
 		RequestIDsServerGenerated: firstHealth.RequestID != clientSuppliedRequestID,
 		AuthenticationEventsCorrelated: validAuthenticationEvent(unknownLoginEntry, "failure", false) &&
-			validAuthenticationEvent(knownFailedLoginEntry, "failure", true) &&
+			validAuthenticationEvent(knownFailedLoginEntry, "failure", false) &&
 			validAuthenticationEvent(successfulLoginEntry, "success", true) &&
 			validAuthenticationEvent(failedTOTPEntry, "failure", true) &&
 			validAuthenticationEvent(successfulTOTPEntry, "success", true) &&
-			validAuthenticationEvent(knownResetEntry, "accepted", true) &&
-			validAuthenticationEvent(unknownResetEntry, "accepted", false) &&
+			validAuthenticationEvent(knownResetEntry, "success", true) &&
+			validAuthenticationEvent(unknownResetEntry, "failure", false) &&
 			failedTOTPEntry["userId"] == successfulTOTPEntry["userId"],
 		AuthenticationSecretsAbsent: authenticationSecretsAbsent(entries, []string{
 			unknownEmail,

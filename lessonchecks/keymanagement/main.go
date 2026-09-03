@@ -13,7 +13,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -56,6 +56,16 @@ func TestLessonKeyManagementPolicy(t *testing.T) {
 	if _, err := currentOnly.Decrypt(oldPayload); err == nil {
 		t.Fatal("unknown key version was accepted")
 	}
+	var missingKeyring *storage.Keyring
+	if _, err := missingKeyring.Encrypt([]byte("missing keyring")); err == nil {
+		t.Fatal("encryption without a configured keyring was accepted")
+	}
+	if _, err := missingKeyring.Decrypt(oldPayload); err == nil {
+		t.Fatal("decryption without a configured keyring was accepted")
+	}
+	if _, err := oldKeyring.Decrypt("not-json"); err == nil {
+		t.Fatal("malformed encrypted payload was accepted")
+	}
 
 	baseEnvironment := map[string]string{
 		"PAWPAL_API_KEY": "pawpal-test-key",
@@ -73,14 +83,41 @@ func TestLessonKeyManagementPolicy(t *testing.T) {
 	if _, err := config.Parse(missing, "."); err == nil {
 		t.Fatal("missing active key version was accepted")
 	}
+	missingAll := cloneEnvironment(baseEnvironment)
+	delete(missingAll, "DATA_ENCRYPTION_ACTIVE_VERSION")
+	delete(missingAll, "DATA_ENCRYPTION_KEY_V1")
+	delete(missingAll, "DATA_ENCRYPTION_KEY_V2")
+	if _, err := config.Parse(missingAll, "."); err == nil {
+		t.Fatal("missing encryption key configuration was accepted")
+	}
 	malformed := cloneEnvironment(baseEnvironment)
 	malformed["DATA_ENCRYPTION_KEY_V2"] = "not-a-key"
 	if _, err := config.Parse(malformed, "."); err == nil {
 		t.Fatal("malformed encryption key was accepted")
 	}
 
+	runtimeConfig, err := config.Load("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeConfigValue := reflect.ValueOf(runtimeConfig)
+	activeVersionValue := runtimeConfigValue.FieldByName("ActiveEncryptionKeyVersion")
+	encryptionKeysValue := runtimeConfigValue.FieldByName("EncryptionKeys")
+	if !activeVersionValue.IsValid() || !encryptionKeysValue.IsValid() {
+		t.Fatal("encryption key configuration was not available")
+	}
+	activeVersion, activeVersionOK := activeVersionValue.Interface().(string)
+	encryptionKeys, encryptionKeysOK := encryptionKeysValue.Interface().(map[string][32]byte)
+	if !activeVersionOK || !encryptionKeysOK {
+		t.Fatal("encryption key configuration had the wrong type")
+	}
+	runtimeKeyring, err := storage.NewKeyring(activeVersion, encryptionKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	ctx := context.Background()
-	databaseConnection, err := database.Open(ctx, os.Getenv("DATABASE_URL"))
+	databaseConnection, err := database.Open(ctx, runtimeConfig.DatabasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,12 +131,12 @@ func TestLessonKeyManagementPolicy(t *testing.T) {
 	if plaintext.Valid || !encrypted.Valid {
 		t.Fatal("seeded TOTP secret was not migrated")
 	}
-	decryptedSecret, err := oldKeyring.Decrypt(encrypted.String)
+	decryptedSecret, err := runtimeKeyring.Decrypt(encrypted.String)
 	if err != nil || string(decryptedSecret) != "KXDYU6DRQPRQXLPY236SJJXPNGHQJVUF" {
 		t.Fatal("migrated TOTP secret could not be decrypted")
 	}
 
-	store := mfa.NewStore(databaseConnection, oldKeyring)
+	store := mfa.NewStore(databaseConnection, runtimeKeyring)
 	secret, _, err := store.StartEnrollment(ctx, 1, "mabel@example.com")
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +146,7 @@ func TestLessonKeyManagementPolicy(t *testing.T) {
 	if err := databaseConnection.QueryRowContext(ctx, "SELECT pending_totp_secret, pending_totp_secret_encrypted FROM users WHERE id = ?", 1).Scan(&pendingPlaintext, &pendingEncrypted); err != nil {
 		t.Fatal(err)
 	}
-	decryptedPending, err := oldKeyring.Decrypt(pendingEncrypted.String)
+	decryptedPending, err := runtimeKeyring.Decrypt(pendingEncrypted.String)
 	if err != nil || pendingPlaintext.Valid || !pendingEncrypted.Valid || string(decryptedPending) != secret {
 		t.Fatal("new pending TOTP secret was not encrypted")
 	}

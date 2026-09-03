@@ -11,6 +11,13 @@ import (
 	"github.com/bootdotdev/learn-web-security/internal/storefront"
 )
 
+type integrationOrderResponse struct {
+	ID         int64  `json:"id"`
+	Status     string `json:"status"`
+	TotalCents int64  `json:"total_cents"`
+	CreatedAt  string `json:"created_at"`
+}
+
 type orderItemResponse struct {
 	ProductID   int64  `json:"product_id"`
 	ProductName string `json:"product_name"`
@@ -22,13 +29,14 @@ type Handler struct {
 	accountStore      *accounts.Store
 	orderStore        *orders.Store
 	productStore      *storefront.Store
+	apiStore          *Store
 	logger            *logging.Logger
 	maxProductResults int64
 }
 
-func NewHandler(accountStore *accounts.Store, orderStore *orders.Store, productStore *storefront.Store, logger *logging.Logger, maxProductResults int) *Handler {
+func NewHandler(accountStore *accounts.Store, orderStore *orders.Store, productStore *storefront.Store, apiStore *Store, logger *logging.Logger, maxProductResults int) *Handler {
 	return &Handler{
-		accountStore: accountStore, orderStore: orderStore, productStore: productStore,
+		accountStore: accountStore, orderStore: orderStore, productStore: productStore, apiStore: apiStore,
 		logger: logger, maxProductResults: int64(maxProductResults),
 	}
 }
@@ -84,6 +92,24 @@ func (handler *Handler) Products(responseWriter http.ResponseWriter, request *ht
 		return
 	}
 	httpx.RespondWithJSON(responseWriter, http.StatusOK, map[string]any{"products": products})
+}
+
+func (handler *Handler) WarehouseOrders(responseWriter http.ResponseWriter, request *http.Request) {
+	orders, err := handler.orderStore.ListAll(request.Context())
+	if err != nil {
+		handler.internalError(responseWriter, request, err)
+		return
+	}
+	responses := make([]integrationOrderResponse, 0, len(orders))
+	for _, order := range orders {
+		responses = append(responses, integrationOrderResponse{
+			ID: order.ID, Status: order.Status, TotalCents: order.TotalCents, CreatedAt: order.CreatedAt,
+		})
+	}
+	httpx.RespondWithJSON(responseWriter, http.StatusOK, map[string]any{
+		"integration": "Warehouse Fulfillment Integration",
+		"orders":      responses,
+	})
 }
 
 func (handler *Handler) requireAuthentication(responseWriter http.ResponseWriter, request *http.Request) (accounts.CurrentSession, bool) {

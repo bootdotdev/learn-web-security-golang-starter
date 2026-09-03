@@ -1,14 +1,26 @@
 package pawpal
 
-import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
+import "fmt"
+
+type WebhookOutcome string
+
+const (
+	WebhookUnauthorized WebhookOutcome = "unauthorized"
+	WebhookMalformed    WebhookOutcome = "malformed"
+	WebhookApproved     WebhookOutcome = "approved"
 )
 
-func CreateReference(orderID, totalCents int64, apiKey string) string {
-	signature := hmac.New(sha256.New, []byte(apiKey))
-	_, _ = fmt.Fprintf(signature, "%d:%d", orderID, totalCents)
-	return fmt.Sprintf("pawpal_%d_%s", orderID, hex.EncodeToString(signature.Sum(nil))[:16])
+type WebhookVerification struct {
+	Outcome WebhookOutcome
+	OrderID int64
+}
+
+func CreateCheckoutURL(orderID int64) string {
+	return fmt.Sprintf("https://pawpal.example/checkout?orderId=%d", orderID)
+}
+
+func VerifyWebhook(payload any) WebhookVerification {
+	payloadRecord, _ := payload.(map[string]any)
+	orderID, _ := payloadRecord["orderId"].(float64)
+	return WebhookVerification{Outcome: WebhookApproved, OrderID: int64(orderID)}
 }

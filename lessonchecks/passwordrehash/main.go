@@ -29,7 +29,11 @@ type result struct {
 
 func main() {
 	ctx := context.Background()
-	databaseConnection, err := database.Open(ctx, os.Getenv("DATABASE_URL"))
+	databasePath := os.Getenv("DATABASE_URL")
+	if databasePath == "" {
+		databasePath = "data/bearly-secure.sqlite"
+	}
+	databaseConnection, err := database.Open(ctx, databasePath)
 	if err != nil {
 		writeResult(result{})
 		return

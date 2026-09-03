@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -12,6 +14,12 @@ import (
 )
 
 const warehouseDailyQuota = 5
+
+type Key struct {
+	ID    int64
+	Name  string
+	Scope string
+}
 
 type Quota struct {
 	Allowed           bool
@@ -29,6 +37,21 @@ type Store struct {
 
 func NewStore(database *sql.DB) *Store {
 	return &Store{queries: dbgen.New(database), now: time.Now}
+}
+
+func (store *Store) FindKey(ctx context.Context, rawKey string) (Key, bool, error) {
+	if rawKey == "" {
+		return Key{}, false, nil
+	}
+	digest := sha256.Sum256([]byte(rawKey))
+	row, err := store.queries.GetActiveAPIKeyByHash(ctx, hex.EncodeToString(digest[:]))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Key{}, false, nil
+	}
+	if err != nil {
+		return Key{}, false, fmt.Errorf("find API key: %w", err)
+	}
+	return Key{ID: row.ID, Name: row.Name, Scope: row.Scope}, true, nil
 }
 
 func (store *Store) ConsumeQuota(ctx context.Context, keyID int64) (Quota, error) {

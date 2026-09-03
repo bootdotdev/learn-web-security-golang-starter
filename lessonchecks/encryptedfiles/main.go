@@ -28,6 +28,7 @@ type result struct {
 	IndividualUploadReadable  bool `json:"individualUploadReadable"`
 	ArchiveImportEncrypted    bool `json:"archiveImportEncrypted"`
 	ArchiveImportReadable     bool `json:"archiveImportReadable"`
+	TamperedDocumentRejected  bool `json:"tamperedDocumentRejected"`
 	FixturePolicyPreserved    bool `json:"fixturePolicyPreserved"`
 }
 
@@ -38,7 +39,11 @@ type storedDocument struct {
 
 func main() {
 	ctx := context.Background()
-	databaseConnection, err := database.Open(ctx, os.Getenv("DATABASE_URL"))
+	databasePath := os.Getenv("DATABASE_URL")
+	if databasePath == "" {
+		databasePath = "data/bearly-secure.sqlite"
+	}
+	databaseConnection, err := database.Open(ctx, databasePath)
 	if err != nil {
 		writeResult(result{})
 		return
@@ -59,6 +64,7 @@ func main() {
 	individual, individualFound := findDocument(ctx, databaseConnection, "uploaded_files", individualName)
 	individualEncrypted := individualStatus == http.StatusFound && individualFound && encryptedAtRest(individual.storagePath)
 	individualReadable := individualFound && signedDownloadMatches(ctx, mabelClient, individual.id, individualContents)
+	tamperedRejected := individualFound && tamperedDownloadRejected(ctx, mabelClient, individual)
 
 	archiveName := fmt.Sprintf("encrypted-archive-%d.pdf", time.Now().UnixNano())
 	archiveContents := []byte("%PDF-1.7\nencrypted archive probe")
@@ -86,6 +92,7 @@ func main() {
 		IndividualUploadReadable:  individualReadable,
 		ArchiveImportEncrypted:    importedEncrypted,
 		ArchiveImportReadable:     importedReadable,
+		TamperedDocumentRejected:  tamperedRejected,
 		FixturePolicyPreserved:    fixtureErr == nil && bytes.HasPrefix(fixtureContents, []byte("%PDF")) && os.IsNotExist(oldFixtureErr) && bytes.Contains(dockerfile, []byte("data/fixtures")),
 	})
 }
@@ -105,6 +112,44 @@ func encryptedAtRest(storagePath string) bool {
 		KeyVersion string `json:"keyVersion"`
 	}
 	return json.Unmarshal(contents, &envelope) == nil && envelope.KeyVersion == "v1"
+}
+
+func tamperedDownloadRejected(ctx context.Context, client *http.Client, document storedDocument) bool {
+	storedContents, err := os.ReadFile(document.storagePath)
+	if err != nil {
+		return false
+	}
+	var envelope map[string]any
+	if json.Unmarshal(storedContents, &envelope) != nil {
+		return false
+	}
+	ciphertext, ok := envelope["ciphertext"].(string)
+	if !ok || len(ciphertext) == 0 {
+		return false
+	}
+	if ciphertext[0] == 'A' {
+		envelope["ciphertext"] = "B" + ciphertext[1:]
+	} else {
+		envelope["ciphertext"] = "A" + ciphertext[1:]
+	}
+	tamperedContents, err := json.Marshal(envelope)
+	if err != nil || os.WriteFile(document.storagePath, tamperedContents, 0o600) != nil {
+		return false
+	}
+	response, err := request(ctx, client, "/files/"+strconv.FormatInt(document.id, 10)+"/download")
+	if err != nil {
+		return false
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusFound || response.Header.Get("Location") == "" {
+		return false
+	}
+	response, err = request(ctx, client, response.Header.Get("Location"))
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	return response.StatusCode == http.StatusInternalServerError
 }
 
 func authenticatedClient(ctx context.Context, email string) (*http.Client, error) {

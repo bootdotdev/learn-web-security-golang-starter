@@ -7,6 +7,7 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"github.com/bootdotdev/learn-web-security/internal/accounts"
 	"github.com/bootdotdev/learn-web-security/internal/auth/sessions"
@@ -23,18 +24,21 @@ type taxExemptionPage struct {
 }
 
 type Handler struct {
-	accountStore    *accounts.Store
-	store           *Store
-	renderer        *templates.Renderer
-	logger          *logging.Logger
-	uploadDirectory string
-	maxUploadBytes  int64
+	accountStore       *accounts.Store
+	store              *Store
+	renderer           *templates.Renderer
+	logger             *logging.Logger
+	encryptionKeyring  Keyring
+	uploadDirectory    string
+	maxUploadBytes     int64
+	downloadSigningKey [32]byte
+	now                func() time.Time
 }
 
-func NewHandler(accountStore *accounts.Store, store *Store, renderer *templates.Renderer, logger *logging.Logger, uploadDirectory string, maxUploadBytes int64) *Handler {
+func NewHandler(accountStore *accounts.Store, store *Store, renderer *templates.Renderer, logger *logging.Logger, encryptionKeyring Keyring, uploadDirectory string, maxUploadBytes int64, downloadSigningKey [32]byte) *Handler {
 	return &Handler{
-		accountStore: accountStore, store: store, renderer: renderer, logger: logger,
-		uploadDirectory: uploadDirectory, maxUploadBytes: maxUploadBytes,
+		accountStore: accountStore, store: store, renderer: renderer, logger: logger, encryptionKeyring: encryptionKeyring,
+		uploadDirectory: uploadDirectory, maxUploadBytes: maxUploadBytes, downloadSigningKey: downloadSigningKey, now: time.Now,
 	}
 }
 
@@ -51,7 +55,7 @@ func (handler *Handler) Upload(responseWriter http.ResponseWriter, request *http
 	if !ok {
 		return
 	}
-	contents, originalName, contentType, err := handler.readUpload(responseWriter, request)
+	contents, originalName, err := handler.readUpload(responseWriter, request)
 	if err != nil {
 		if errors.Is(err, errUploadTooLarge) {
 			handler.errorPage(responseWriter, http.StatusRequestEntityTooLarge, "Content Too Large", "The submitted request exceeds the allowed size.")
@@ -60,9 +64,13 @@ func (handler *Handler) Upload(responseWriter http.ResponseWriter, request *http
 		handler.renderTaxExemption(responseWriter, request, http.StatusBadRequest, current, "Choose a PDF, JPEG, PNG, or WebP file to upload.")
 		return
 	}
-	document, err := StoreDocument(contents, originalName, contentType, handler.uploadDirectory)
+	document, valid, err := StoreDocument(contents, handler.uploadDirectory, handler.encryptionKeyring)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
+		return
+	}
+	if !valid {
+		handler.renderTaxExemption(responseWriter, request, http.StatusBadRequest, current, "Choose a valid PDF, JPEG, PNG, or WebP file.")
 		return
 	}
 	uploadedFile, err := handler.store.Create(request.Context(), current.User.ID, originalName, document)
@@ -86,6 +94,27 @@ func (handler *Handler) Download(responseWriter http.ResponseWriter, request *ht
 	fileID, valid := httpx.ParseSafeInteger(request.PathValue("id"))
 	if !valid {
 		handler.fileNotFound(responseWriter)
+		return
+	}
+	file, found, err := handler.store.FindByID(request.Context(), fileID)
+	if err != nil {
+		handler.internalError(responseWriter, request, err)
+		return
+	}
+	if !found {
+		handler.fileNotFound(responseWriter)
+		return
+	}
+	http.Redirect(responseWriter, request, CreateSignedDownloadPath(handler.downloadSigningKey, file.ID, handler.now()), http.StatusFound)
+}
+
+func (handler *Handler) SignedDownload(responseWriter http.ResponseWriter, request *http.Request) {
+	fileID, valid := httpx.ParseSafeInteger(request.PathValue("id"))
+	query := request.URL.Query()
+	expires := query.Get("expires")
+	signature := query.Get("signature")
+	if !valid || len(query["expires"]) != 1 || len(query["signature"]) != 1 || !VerifySignedDownload(handler.downloadSigningKey, fileID, expires, signature, handler.now()) {
+		handler.errorPage(responseWriter, http.StatusForbidden, "Download Link Unavailable", "This download link is invalid or has expired.")
 		return
 	}
 	file, found, err := handler.store.FindByID(request.Context(), fileID)
@@ -128,35 +157,35 @@ func (handler *Handler) ImportedDownload(responseWriter http.ResponseWriter, req
 
 var errUploadTooLarge = errors.New("document upload is too large")
 
-func (handler *Handler) readUpload(responseWriter http.ResponseWriter, request *http.Request) ([]byte, string, string, error) {
+func (handler *Handler) readUpload(responseWriter http.ResponseWriter, request *http.Request) ([]byte, string, error) {
 	request.Body = http.MaxBytesReader(responseWriter, request.Body, handler.maxUploadBytes+1024*1024)
 	if err := request.ParseMultipartForm(handler.maxUploadBytes); err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			return nil, "", "", errUploadTooLarge
+			return nil, "", errUploadTooLarge
 		}
-		return nil, "", "", err
+		return nil, "", err
 	}
 	files := request.MultipartForm.File["document"]
 	if len(files) == 0 {
-		return nil, "", "", errors.New("missing document upload")
+		return nil, "", errors.New("missing document upload")
 	}
 	file, err := files[0].Open()
 	if err != nil {
-		return nil, "", "", fmt.Errorf("open document upload: %w", err)
+		return nil, "", fmt.Errorf("open document upload: %w", err)
 	}
 	defer file.Close()
 	contents, err := io.ReadAll(io.LimitReader(file, handler.maxUploadBytes+1))
 	if err != nil {
-		return nil, "", "", fmt.Errorf("read document upload: %w", err)
+		return nil, "", fmt.Errorf("read document upload: %w", err)
 	}
 	if int64(len(contents)) > handler.maxUploadBytes {
-		return nil, "", "", errUploadTooLarge
+		return nil, "", errUploadTooLarge
 	}
-	return contents, filepath.Base(files[0].Filename), files[0].Header.Get("Content-Type"), nil
+	return contents, filepath.Base(files[0].Filename), nil
 }
 
 func (handler *Handler) serveDocument(responseWriter http.ResponseWriter, request *http.Request, originalName, contentType, storagePath string) {
-	contents, err := ReadDocument(storagePath)
+	contents, err := ReadDocument(storagePath, handler.encryptionKeyring)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return

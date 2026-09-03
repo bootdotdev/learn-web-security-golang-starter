@@ -10,17 +10,29 @@ import (
 	"database/sql"
 )
 
+const approvePawPalOrder = `-- name: ApprovePawPalOrder :execrows
+UPDATE orders
+SET status = 'paid'
+WHERE id = ? AND status = 'pending'
+`
+
+func (q *Queries) ApprovePawPalOrder(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, approvePawPalOrder, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const createOrder = `-- name: CreateOrder :one
 INSERT INTO orders (
   user_id,
   status,
   total_cents,
   admin_notes,
-  shipping_details_encrypted,
-  payment_reference,
-  payment_status
+  shipping_details_encrypted
 )
-VALUES (?, 'paid', ?, ?, ?, ?, ?)
+VALUES (?, 'pending', ?, ?, ?)
 RETURNING id
 `
 
@@ -29,8 +41,6 @@ type CreateOrderParams struct {
 	TotalCents               int64   `json:"total_cents"`
 	AdminNotes               string  `json:"admin_notes"`
 	ShippingDetailsEncrypted *string `json:"shipping_details_encrypted"`
-	PaymentReference         *string `json:"payment_reference"`
-	PaymentStatus            *string `json:"payment_status"`
 }
 
 func (q *Queries) CreateOrder(ctx context.Context, arg CreateOrderParams) (int64, error) {
@@ -39,8 +49,6 @@ func (q *Queries) CreateOrder(ctx context.Context, arg CreateOrderParams) (int64
 		arg.TotalCents,
 		arg.AdminNotes,
 		arg.ShippingDetailsEncrypted,
-		arg.PaymentReference,
-		arg.PaymentStatus,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -106,8 +114,6 @@ SELECT
   orders.total_cents,
   orders.admin_notes,
   orders.shipping_details_encrypted,
-  orders.payment_reference,
-  orders.payment_status,
   orders.created_at
 FROM orders
 JOIN users ON users.id = orders.user_id
@@ -123,8 +129,6 @@ type GetOrderByIDRow struct {
 	TotalCents               int64   `json:"total_cents"`
 	AdminNotes               string  `json:"admin_notes"`
 	ShippingDetailsEncrypted *string `json:"shipping_details_encrypted"`
-	PaymentReference         *string `json:"payment_reference"`
-	PaymentStatus            *string `json:"payment_status"`
 	CreatedAt                string  `json:"created_at"`
 }
 
@@ -140,8 +144,6 @@ func (q *Queries) GetOrderByID(ctx context.Context, id int64) (GetOrderByIDRow, 
 		&i.TotalCents,
 		&i.AdminNotes,
 		&i.ShippingDetailsEncrypted,
-		&i.PaymentReference,
-		&i.PaymentStatus,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -157,8 +159,6 @@ SELECT
   orders.total_cents,
   orders.admin_notes,
   orders.shipping_details_encrypted,
-  orders.payment_reference,
-  orders.payment_status,
   orders.created_at
 FROM orders
 JOIN users ON users.id = orders.user_id
@@ -174,8 +174,6 @@ type ListAllOrdersRow struct {
 	TotalCents               int64   `json:"total_cents"`
 	AdminNotes               string  `json:"admin_notes"`
 	ShippingDetailsEncrypted *string `json:"shipping_details_encrypted"`
-	PaymentReference         *string `json:"payment_reference"`
-	PaymentStatus            *string `json:"payment_status"`
 	CreatedAt                string  `json:"created_at"`
 }
 
@@ -197,8 +195,6 @@ func (q *Queries) ListAllOrders(ctx context.Context) ([]ListAllOrdersRow, error)
 			&i.TotalCents,
 			&i.AdminNotes,
 			&i.ShippingDetailsEncrypted,
-			&i.PaymentReference,
-			&i.PaymentStatus,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -277,8 +273,6 @@ SELECT
   orders.total_cents,
   orders.admin_notes,
   orders.shipping_details_encrypted,
-  orders.payment_reference,
-  orders.payment_status,
   orders.created_at
 FROM orders
 JOIN users ON users.id = orders.user_id
@@ -295,8 +289,6 @@ type ListOrdersForUserRow struct {
 	TotalCents               int64   `json:"total_cents"`
 	AdminNotes               string  `json:"admin_notes"`
 	ShippingDetailsEncrypted *string `json:"shipping_details_encrypted"`
-	PaymentReference         *string `json:"payment_reference"`
-	PaymentStatus            *string `json:"payment_status"`
 	CreatedAt                string  `json:"created_at"`
 }
 
@@ -318,8 +310,6 @@ func (q *Queries) ListOrdersForUser(ctx context.Context, userID int64) ([]ListOr
 			&i.TotalCents,
 			&i.AdminNotes,
 			&i.ShippingDetailsEncrypted,
-			&i.PaymentReference,
-			&i.PaymentStatus,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err

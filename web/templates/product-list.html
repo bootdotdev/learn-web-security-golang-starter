@@ -25,6 +25,11 @@
     </p>
     {{else}}
     <form method="post" action="/cart/items" class="inline-cart-form">
+      {{if .CSRFToken}}<input
+        name="csrfToken"
+        type="hidden"
+        value="{{.CSRFToken}}"
+      />{{end}}
       <input name="productId" type="hidden" value="{{.ID}}" />
       <input name="quantity" type="hidden" value="1" />
       <button type="submit">Add to cart</button>

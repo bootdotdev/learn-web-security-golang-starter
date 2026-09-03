@@ -46,6 +46,7 @@
               action="/cart/items/{{.ProductID}}"
               class="quantity-form"
             >
+              <input name="csrfToken" type="hidden" value="{{$.CSRFToken}}" />
               <input
                 name="quantity"
                 type="number"
@@ -67,7 +68,11 @@
             action="/cart/items/{{.ProductID}}"
             class="remove-item-form"
           >
-            <input name="quantity" type="hidden" value="0" /><button
+            <input
+              name="csrfToken"
+              type="hidden"
+              value="{{$.CSRFToken}}"
+            /><input name="quantity" type="hidden" value="0" /><button
               type="submit"
               class="danger-link"
             >

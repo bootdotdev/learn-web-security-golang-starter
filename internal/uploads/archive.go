@@ -44,10 +44,11 @@ type plannedArchiveEntry struct {
 	directory   bool
 	destination string
 	contents    string
+	encrypted   bool
 	document    ExtractedTaxDocument
 }
 
-func ExtractTaxDocumentArchive(contents []byte, extractionDirectory string) (ExtractedTaxDocumentArchive, error) {
+func ExtractTaxDocumentArchive(encryptionKeyring Keyring, contents []byte, extractionDirectory string) (ExtractedTaxDocumentArchive, error) {
 	archiveReader, err := zip.NewReader(bytes.NewReader(contents), int64(len(contents)))
 	if err != nil {
 		return ExtractedTaxDocumentArchive{}, &ArchiveImportError{Message: "Choose a valid ZIP archive.", StatusCode: 400}
@@ -86,9 +87,17 @@ func ExtractTaxDocumentArchive(contents []byte, extractionDirectory string) (Ext
 		if contentType == "" {
 			contentType = "application/octet-stream"
 		}
+		storedContents, encrypted, err := encryptDocument(entryContents, encryptionKeyring)
+		if err != nil {
+			return ExtractedTaxDocumentArchive{}, err
+		}
+		storagePath := entryDestination
+		if encrypted {
+			storagePath += ".enc"
+		}
 		plannedEntries = append(plannedEntries, plannedArchiveEntry{
-			destination: entryDestination, contents: string(entryContents),
-			document: ExtractedTaxDocument{OriginalName: entry.Name, StoragePath: entryDestination, ContentType: contentType},
+			destination: storagePath, contents: storedContents, encrypted: encrypted,
+			document: ExtractedTaxDocument{OriginalName: entry.Name, StoragePath: storagePath, ContentType: contentType},
 		})
 	}
 
@@ -114,7 +123,13 @@ func ExtractTaxDocumentArchive(contents []byte, extractionDirectory string) (Ext
 		if err := os.MkdirAll(filepath.Dir(entry.destination), 0o755); err != nil {
 			return discardArchiveAfterWriteFailure(archive, err)
 		}
-		file, err := os.OpenFile(entry.destination, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+		fileMode := os.FileMode(0o644)
+		fileFlags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+		if entry.encrypted {
+			fileMode = 0o600
+			fileFlags = os.O_WRONLY | os.O_CREATE | os.O_EXCL
+		}
+		file, err := os.OpenFile(entry.destination, fileFlags, fileMode)
 		if err != nil {
 			return discardArchiveAfterWriteFailure(archive, err)
 		}

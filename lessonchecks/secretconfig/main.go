@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +19,6 @@ import (
 )
 
 const (
-	applicationOrigin  = "http://localhost:3030"
 	pawPalKey          = "bs_test_pawpal_lesson_key"
 	downloadSigningHex = "2222222222222222222222222222222222222222222222222222222222222222"
 )
@@ -51,7 +51,8 @@ func main() {
 	_, invalidDownloadError := config.Parse(invalidDownloadEnvironment, ".")
 
 	dotenvLoaded, processEnvironmentWins := checkDotenvPrecedence()
-	configuredDownloadKeyUsed := checkSignedDownload()
+	applicationOrigin, downloadSigningKey, runtimeConfigLoaded := loadRuntimeDownloadConfiguration()
+	configuredDownloadKeyUsed := runtimeConfigLoaded && checkSignedDownload(applicationOrigin, downloadSigningKey)
 
 	writeResult(result{
 		PawPalKeyRequired:         missingPawPalError != nil,
@@ -98,7 +99,23 @@ func restoreEnvironment(name, value string, present bool) {
 	_ = os.Unsetenv(name)
 }
 
-func checkSignedDownload() bool {
+func loadRuntimeDownloadConfiguration() (string, [32]byte, bool) {
+	loadedConfig, err := config.Load(".")
+	if err != nil {
+		return "", [32]byte{}, false
+	}
+	configValue := reflect.ValueOf(loadedConfig)
+	applicationOriginValue := configValue.FieldByName("AppOrigin")
+	downloadSigningKeyValue := configValue.FieldByName("DownloadSigningKey")
+	if !applicationOriginValue.IsValid() || !downloadSigningKeyValue.IsValid() {
+		return "", [32]byte{}, false
+	}
+	applicationOrigin, applicationOriginOK := applicationOriginValue.Interface().(string)
+	downloadSigningKey, downloadSigningKeyOK := downloadSigningKeyValue.Interface().([32]byte)
+	return applicationOrigin, downloadSigningKey, applicationOriginOK && downloadSigningKeyOK
+}
+
+func checkSignedDownload(applicationOrigin string, downloadSigningKey [32]byte) bool {
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	form := url.Values{"email": {"mabel@example.com"}, "password": {"password123"}, "returnTo": {"/"}}
 	request, err := http.NewRequest(http.MethodPost, applicationOrigin+"/login", strings.NewReader(form.Encode()))
@@ -135,17 +152,11 @@ func checkSignedDownload() bool {
 	if err != nil {
 		return false
 	}
-	keyBytes, err := hex.DecodeString(downloadSigningHex)
-	if err != nil || len(keyBytes) != 32 {
-		return false
-	}
-	var key [32]byte
-	copy(key[:], keyBytes)
 	expires, err := strconv.ParseInt(location.Query().Get("expires"), 10, 64)
 	if err != nil || expires <= time.Now().Unix() {
 		return false
 	}
-	mac := hmac.New(sha256.New, key[:])
+	mac := hmac.New(sha256.New, downloadSigningKey[:])
 	fmt.Fprintf(mac, "GET\n/files/1/signed-download\n%d", expires)
 	expectedSignature := hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(expectedSignature), []byte(location.Query().Get("signature")))

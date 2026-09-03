@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -12,37 +13,44 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/bootdotdev/learn-web-security/internal/database"
-	"github.com/bootdotdev/learn-web-security/internal/logging"
 )
-
-const checkoutToken = "pawpal_tok_bearly_secure_demo"
 
 var csrfPattern = regexp.MustCompile(`name="csrfToken"\s+type="hidden"\s+value="([^"]+)"`)
 
 type result struct {
-	RawFieldsRejectedSeparately bool `json:"rawFieldsRejectedSeparately"`
-	MissingTokenRejected        bool `json:"missingTokenRejected"`
-	ForgedTokenRejected         bool `json:"forgedTokenRejected"`
-	RejectedRequestsHaveNoOrder bool `json:"rejectedRequestsHaveNoOrder"`
-	ServerAmountUsed            bool `json:"serverAmountUsed"`
-	ApprovedReferenceStored     bool `json:"approvedReferenceStored"`
-	FreshAttemptReferenceUsed   bool `json:"freshAttemptReferenceUsed"`
-	PaymentTokenRedacted        bool `json:"paymentTokenRedacted"`
+	InvalidKeyRejected           bool `json:"invalidKeyRejected"`
+	InvalidKeyLeftOrderPending   bool `json:"invalidKeyLeftOrderPending"`
+	MalformedPayloadRejected     bool `json:"malformedPayloadRejected"`
+	MalformedPayloadLeftPending  bool `json:"malformedPayloadLeftOrderPending"`
+	UnapprovedStatusRejected     bool `json:"unapprovedStatusRejected"`
+	UnapprovedStatusLeftPending  bool `json:"unapprovedStatusLeftOrderPending"`
+	ApprovedWebhookAccepted      bool `json:"approvedWebhookAccepted"`
+	OrderMarkedPaid              bool `json:"orderMarkedPaid"`
+	ServerCalculatedTotal        bool `json:"serverCalculatedTotal"`
+	NoRawPaymentColumns          bool `json:"noRawPaymentColumns"`
+	WebhookKeyAbsentFromLogs     bool `json:"webhookKeyAbsentFromLogs"`
+	CheckoutLogKeepsOrderContext bool `json:"checkoutLogKeepsOrderContext"`
 }
 
 func main() {
 	ctx := context.Background()
-	databaseConnection, err := database.Open(ctx, os.Getenv("DATABASE_URL"))
+	databasePath := os.Getenv("DATABASE_URL")
+	if databasePath == "" {
+		databasePath = "data/bearly-secure.sqlite"
+	}
+	databaseConnection, err := database.Open(ctx, databasePath)
 	if err != nil {
 		writeResult(result{})
 		return
 	}
 	defer databaseConnection.Close()
+	pawPalAPIKey := environmentValue("PAWPAL_API_KEY")
 	client, err := authenticatedClient(ctx)
-	if err != nil {
+	if err != nil || pawPalAPIKey == "" {
 		writeResult(result{})
 		return
 	}
@@ -51,65 +59,119 @@ func main() {
 		writeResult(result{})
 		return
 	}
-
-	initialOrders := countOrders(ctx, databaseConnection)
-	rawFieldsRejected := true
-	for name, value := range map[string]string{"cardNumber": "4111111111111111", "cvv": "123", "expiry": "12/30"} {
-		resetCart(ctx, databaseConnection)
-		values := checkoutValues(csrfToken, checkoutToken)
-		values.Set(name, value)
-		rawFieldsRejected = rawFieldsRejected && submitCheckout(ctx, client, values) == http.StatusBadRequest
+	resetCart(ctx, databaseConnection)
+	checkoutResponse, err := submitForm(ctx, client, "/checkout", checkoutValues(csrfToken))
+	if err != nil {
+		writeResult(result{})
+		return
 	}
-	afterRawFields := countOrders(ctx, databaseConnection)
+	checkoutResponse.Body.Close()
+	orderID, err := redirectedOrderID(checkoutResponse)
+	if err != nil {
+		writeResult(result{})
+		return
+	}
 
-	resetCart(ctx, databaseConnection)
-	missingValues := checkoutValues(csrfToken, "")
-	missingValues.Del("paymentToken")
-	missingRejected := submitCheckout(ctx, client, missingValues) == http.StatusBadRequest
-	afterMissing := countOrders(ctx, databaseConnection)
-
-	resetCart(ctx, databaseConnection)
-	forgedRejected := submitCheckout(ctx, client, checkoutValues(csrfToken, "forged-token")) == http.StatusBadRequest
-	afterForged := countOrders(ctx, databaseConnection)
-
-	resetCart(ctx, databaseConnection)
-	validValues := checkoutValues(csrfToken, checkoutToken)
-	validValues.Set("amountCents", "1")
-	validStatus := submitCheckout(ctx, client, validValues)
-	firstPayment := latestPayment(ctx, databaseConnection)
-
-	resetCart(ctx, databaseConnection)
-	secondStatus := submitCheckout(ctx, client, checkoutValues(csrfToken, checkoutToken))
-	secondPayment := latestPayment(ctx, databaseConnection)
+	invalidKeyStatus := submitWebhook(ctx, "wrong-key", fmt.Sprintf(`{"orderId":%d,"status":"approved"}`, orderID))
+	statusAfterInvalidKey, _ := readOrder(ctx, databaseConnection, orderID)
+	malformedStatus := submitWebhook(ctx, pawPalAPIKey, fmt.Sprintf(`{"customerId":%d,"status":"approved"}`, orderID))
+	statusAfterMalformed, _ := readOrder(ctx, databaseConnection, orderID)
+	unapprovedStatus := submitWebhook(ctx, pawPalAPIKey, fmt.Sprintf(`{"orderId":%d,"status":"declined"}`, orderID))
+	statusAfterUnapproved, _ := readOrder(ctx, databaseConnection, orderID)
+	approvedStatus := submitWebhook(ctx, pawPalAPIKey, fmt.Sprintf(`{"orderId":%d,"status":"approved"}`, orderID))
+	statusAfterApproval, totalCents := readOrder(ctx, databaseConnection, orderID)
+	noRawPaymentColumns := rawPaymentColumnsAbsent(ctx, databaseConnection)
+	keyAbsent, logKeepsContext := inspectLog(orderID, pawPalAPIKey)
 
 	writeResult(result{
-		RawFieldsRejectedSeparately: rawFieldsRejected,
-		MissingTokenRejected:        missingRejected,
-		ForgedTokenRejected:         forgedRejected,
-		RejectedRequestsHaveNoOrder: afterRawFields == initialOrders && afterMissing == initialOrders && afterForged == initialOrders,
-		ServerAmountUsed:            validStatus == http.StatusFound && firstPayment.totalCents == 2499,
-		ApprovedReferenceStored:     strings.HasPrefix(firstPayment.reference, "pawpal_txn_") && firstPayment.status == "approved",
-		FreshAttemptReferenceUsed:   secondStatus == http.StatusFound && secondPayment.reference != "" && secondPayment.reference != firstPayment.reference,
-		PaymentTokenRedacted:        paymentTokenRedacted(),
+		InvalidKeyRejected:           invalidKeyStatus == http.StatusUnauthorized,
+		InvalidKeyLeftOrderPending:   statusAfterInvalidKey == "pending",
+		MalformedPayloadRejected:     malformedStatus == http.StatusBadRequest,
+		MalformedPayloadLeftPending:  statusAfterMalformed == "pending",
+		UnapprovedStatusRejected:     unapprovedStatus == http.StatusBadRequest,
+		UnapprovedStatusLeftPending:  statusAfterUnapproved == "pending",
+		ApprovedWebhookAccepted:      approvedStatus == http.StatusNoContent,
+		OrderMarkedPaid:              statusAfterApproval == "paid",
+		ServerCalculatedTotal:        totalCents == 2499,
+		NoRawPaymentColumns:          noRawPaymentColumns,
+		WebhookKeyAbsentFromLogs:     keyAbsent,
+		CheckoutLogKeepsOrderContext: logKeepsContext,
 	})
 }
 
-type paymentRecord struct {
-	reference  string
-	status     string
-	totalCents int64
+func redirectedOrderID(response *http.Response) (int64, error) {
+	if response.StatusCode != http.StatusFound {
+		return 0, fmt.Errorf("checkout status: %d", response.StatusCode)
+	}
+	location, err := response.Location()
+	if err != nil || location.Scheme != "https" || location.Host != "pawpal.example" || location.Path != "/checkout" {
+		return 0, fmt.Errorf("invalid PawPal redirect")
+	}
+	orderID, err := strconv.ParseInt(location.Query().Get("orderId"), 10, 64)
+	if err != nil || orderID <= 0 {
+		return 0, fmt.Errorf("invalid order ID")
+	}
+	return orderID, nil
 }
 
-func latestPayment(ctx context.Context, databaseConnection *sql.DB) paymentRecord {
-	var payment paymentRecord
-	_ = databaseConnection.QueryRowContext(ctx, "SELECT payment_reference, payment_status, total_cents FROM orders WHERE user_id = 1 ORDER BY id DESC LIMIT 1").Scan(&payment.reference, &payment.status, &payment.totalCents)
-	return payment
+func readOrder(ctx context.Context, databaseConnection *sql.DB, orderID int64) (string, int64) {
+	var status string
+	var totalCents int64
+	_ = databaseConnection.QueryRowContext(ctx, "SELECT status, total_cents FROM orders WHERE id = ?", orderID).Scan(&status, &totalCents)
+	return status, totalCents
 }
 
-func countOrders(ctx context.Context, databaseConnection *sql.DB) int {
-	var count int
-	_ = databaseConnection.QueryRowContext(ctx, "SELECT COUNT(*) FROM orders").Scan(&count)
-	return count
+func rawPaymentColumnsAbsent(ctx context.Context, databaseConnection *sql.DB) bool {
+	rows, err := databaseConnection.QueryContext(ctx, "PRAGMA table_info(orders)")
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	forbidden := map[string]bool{"card_number": true, "cardNumber": true, "cvv": true, "expiry": true, "payment_token": true, "paymentToken": true}
+	for rows.Next() {
+		var columnID int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if rows.Scan(&columnID, &name, &columnType, &notNull, &defaultValue, &primaryKey) != nil || forbidden[name] {
+			return false
+		}
+	}
+	return rows.Err() == nil
+}
+
+func inspectLog(orderID int64, pawPalAPIKey string) (bool, bool) {
+	contents, err := os.ReadFile(filepath.Join("data", "bearly-secure.log"))
+	if err != nil {
+		return false, false
+	}
+	keyAbsent := !strings.Contains(string(contents), pawPalAPIKey)
+	logKeepsContext := false
+	scanner := bufio.NewScanner(strings.NewReader(string(contents)))
+	for scanner.Scan() {
+		var record map[string]any
+		if json.Unmarshal(scanner.Bytes(), &record) == nil && record["event"] == "checkout_started" && record["orderId"] == float64(orderID) {
+			_, hasCardNumber := record["cardNumber"]
+			_, hasPaymentToken := record["paymentToken"]
+			logKeepsContext = record["totalCents"] == float64(2499) && !hasCardNumber && !hasPaymentToken
+		}
+	}
+	return keyAbsent, logKeepsContext
+}
+
+func submitWebhook(ctx context.Context, apiKey, body string) int {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, origin()+"/integrations/pawpal/webhook", strings.NewReader(body))
+	if err != nil {
+		return 0
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-PawPal-Key", apiKey)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return 0
+	}
+	defer response.Body.Close()
+	return response.StatusCode
 }
 
 func resetCart(ctx context.Context, databaseConnection *sql.DB) {
@@ -117,12 +179,12 @@ func resetCart(ctx context.Context, databaseConnection *sql.DB) {
 	_, _ = databaseConnection.ExecContext(ctx, "INSERT INTO cart_items (user_id, product_id, quantity) VALUES (1, 1, 1)")
 }
 
-func checkoutValues(csrfToken, paymentToken string) url.Values {
+func checkoutValues(csrfToken string) url.Values {
 	return url.Values{
 		"csrfToken": {csrfToken}, "shippingName": {"Payment Bear"},
 		"shippingAddress": {"12 Hosted Lane"}, "shippingCity": {"Lockbox"},
 		"shippingRegion": {"VA"}, "shippingPostalCode": {"22030"},
-		"paymentToken": {paymentToken},
+		"amountCents": {"1"},
 	}
 }
 
@@ -157,17 +219,8 @@ func findCSRFToken(ctx context.Context, client *http.Client) (string, error) {
 	return string(match[1]), nil
 }
 
-func submitCheckout(ctx context.Context, client *http.Client, values url.Values) int {
-	response, err := submitForm(ctx, client, "/checkout", values)
-	if err != nil {
-		return 0
-	}
-	defer response.Body.Close()
-	return response.StatusCode
-}
-
-func submitForm(ctx context.Context, client *http.Client, path string, values url.Values) (*http.Response, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, origin()+path, strings.NewReader(values.Encode()))
+func submitForm(ctx context.Context, client *http.Client, requestPath string, values url.Values) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, origin()+requestPath, strings.NewReader(values.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -176,30 +229,27 @@ func submitForm(ctx context.Context, client *http.Client, path string, values ur
 	return client.Do(request)
 }
 
-func paymentTokenRedacted() bool {
-	directory, err := os.MkdirTemp("", "payment-redaction-")
+func environmentValue(name string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	file, err := os.Open(".env")
 	if err != nil {
-		return false
+		return ""
 	}
-	defer os.RemoveAll(directory)
-	path := filepath.Join(directory, "probe.log")
-	logger, err := logging.Open(path)
-	if err != nil {
-		return false
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		key, value, found := strings.Cut(scanner.Text(), "=")
+		if found && strings.TrimSpace(key) == name {
+			return strings.Trim(strings.TrimSpace(value), `"'`)
+		}
 	}
-	if logger.Event("payment_probe", map[string]any{"paymentToken": checkoutToken, "orderId": 42}) != nil || logger.Close() != nil {
-		return false
-	}
-	contents, err := os.ReadFile(path)
-	if err != nil || strings.Contains(string(contents), checkoutToken) {
-		return false
-	}
-	var record map[string]any
-	return json.Unmarshal(contents, &record) == nil && record["paymentToken"] == "[REDACTED]" && record["orderId"] == float64(42)
+	return ""
 }
 
 func origin() string {
-	return strings.TrimRight(os.Getenv("APP_ORIGIN"), "/")
+	return strings.TrimRight(environmentValue("APP_ORIGIN"), "/")
 }
 
 func writeResult(output result) {

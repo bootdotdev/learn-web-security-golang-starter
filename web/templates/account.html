@@ -27,7 +27,11 @@
       <dd>{{.Current.User.Role}}</dd>
     </dl>
     <form method="post" action="/account/email" class="account-form">
-      <label
+      <input
+        name="csrfToken"
+        type="hidden"
+        value="{{.Current.Session.CSRFToken}}"
+      /><label
         >Email<input
           name="email"
           type="email"

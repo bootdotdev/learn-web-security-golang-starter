@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bootdotdev/learn-web-security/internal/database/dbgen"
+	"github.com/bootdotdev/learn-web-security/internal/storage"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 )
@@ -23,6 +24,7 @@ import (
 const (
 	challengeTTL                 = 5 * time.Minute
 	challengeAttempts            = 5
+	recoveryAttemptWindow        = 15 * time.Minute
 	defaultBackupCodeCount       = 8
 	totpPeriodSeconds      int64 = 30
 )
@@ -38,14 +40,16 @@ type Challenge struct {
 type Store struct {
 	database *sql.DB
 	queries  *dbgen.Queries
+	keyring  *storage.Keyring
 	now      func() time.Time
 	random   io.Reader
 }
 
-func NewStore(database *sql.DB) *Store {
+func NewStore(database *sql.DB, keyring *storage.Keyring) *Store {
 	return &Store{
 		database: database,
 		queries:  dbgen.New(database),
+		keyring:  keyring,
 		now:      time.Now,
 		random:   rand.Reader,
 	}
@@ -64,8 +68,21 @@ func (store *Store) StartEnrollment(ctx context.Context, userID int64, email str
 	if err != nil {
 		return "", "", fmt.Errorf("generate TOTP secret: %w", err)
 	}
-	if _, err := store.database.ExecContext(ctx, "UPDATE users SET pending_totp_secret = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", key.Secret(), userID); err != nil {
-		return "", "", fmt.Errorf("store pending TOTP secret: %w", err)
+	if store.keyring == nil {
+		if _, err := store.database.ExecContext(ctx, "UPDATE users SET pending_totp_secret = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", key.Secret(), userID); err != nil {
+			return "", "", fmt.Errorf("store pending TOTP secret: %w", err)
+		}
+	} else {
+		encryptedSecret, err := store.keyring.Encrypt([]byte(key.Secret()))
+		if err != nil {
+			return "", "", fmt.Errorf("encrypt pending TOTP secret: %w", err)
+		}
+		if err := store.queries.SetPendingTOTPSecret(ctx, dbgen.SetPendingTOTPSecretParams{
+			PendingTotpSecretEncrypted: &encryptedSecret,
+			ID:                         userID,
+		}); err != nil {
+			return "", "", fmt.Errorf("store pending TOTP secret: %w", err)
+		}
 	}
 	qrDataURL, err := qrDataURL(key)
 	if err != nil {
@@ -123,14 +140,18 @@ func (store *Store) ConfirmEnrollment(ctx context.Context, userID int64) ([]stri
 	defer transaction.Rollback()
 
 	queries := store.queries.WithTx(transaction)
-	if _, err := transaction.ExecContext(ctx, `
-		UPDATE users
-		SET totp_secret = pending_totp_secret,
-			pending_totp_secret = NULL,
-			last_totp_step = NULL,
-			updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, userID); err != nil {
+	if store.keyring == nil {
+		if _, err := transaction.ExecContext(ctx, `
+			UPDATE users
+			SET totp_secret = pending_totp_secret,
+				pending_totp_secret = NULL,
+				last_totp_step = NULL,
+				updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`, userID); err != nil {
+			return nil, fmt.Errorf("confirm TOTP secret: %w", err)
+		}
+	} else if err := queries.ConfirmTOTPSecret(ctx, userID); err != nil {
 		return nil, fmt.Errorf("confirm TOTP secret: %w", err)
 	}
 	backupCodes, err := generateBackupCodes(store.random, defaultBackupCodeCount)
@@ -264,20 +285,72 @@ func (store *Store) ConsumeBackupCode(ctx context.Context, userID int64, code st
 	return count == 1, nil
 }
 
-func (store *Store) decryptSecret(ctx context.Context, userID int64, pending bool) (string, bool, error) {
-	column := "totp_secret"
-	if pending {
-		column = "pending_totp_secret"
+func (store *Store) CountRecentRecoveryFailures(ctx context.Context, email string) (int64, error) {
+	cutoff := formatTimestamp(store.now().UTC().Add(-recoveryAttemptWindow))
+	if err := store.queries.PruneMFARecoveryAttempts(ctx, cutoff); err != nil {
+		return 0, fmt.Errorf("prune MFA recovery attempts: %w", err)
 	}
-	var secret *string
-	err := store.database.QueryRowContext(ctx, "SELECT "+column+" FROM users WHERE id = ?", userID).Scan(&secret)
-	if errors.Is(err, sql.ErrNoRows) || secret == nil {
+	count, err := store.queries.CountRecentMFARecoveryFailures(ctx, dbgen.CountRecentMFARecoveryFailuresParams{
+		Email:  email,
+		Cutoff: cutoff,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("count recent MFA recovery attempts: %w", err)
+	}
+	return count, nil
+}
+
+func (store *Store) RecordRecoveryAttempt(ctx context.Context, email string, userID *int64, succeeded bool) error {
+	success := int64(0)
+	if succeeded {
+		success = 1
+	}
+	if err := store.queries.RecordMFARecoveryAttempt(ctx, dbgen.RecordMFARecoveryAttemptParams{
+		Email:     email,
+		UserID:    userID,
+		Success:   success,
+		CreatedAt: formatTimestamp(store.now().UTC()),
+	}); err != nil {
+		return fmt.Errorf("record MFA recovery attempt: %w", err)
+	}
+	return nil
+}
+
+func (store *Store) decryptSecret(ctx context.Context, userID int64, pending bool) (string, bool, error) {
+	if store.keyring == nil {
+		column := "totp_secret"
+		if pending {
+			column = "pending_totp_secret"
+		}
+		var secret *string
+		err := store.database.QueryRowContext(ctx, "SELECT "+column+" FROM users WHERE id = ?", userID).Scan(&secret)
+		if errors.Is(err, sql.ErrNoRows) || secret == nil {
+			return "", false, nil
+		}
+		if err != nil {
+			return "", false, fmt.Errorf("get TOTP secret: %w", err)
+		}
+		return *secret, true, nil
+	}
+
+	var encryptedSecret *string
+	var err error
+	if pending {
+		encryptedSecret, err = store.queries.GetPendingTOTPSecret(ctx, userID)
+	} else {
+		encryptedSecret, err = store.queries.GetTOTPSecret(ctx, userID)
+	}
+	if errors.Is(err, sql.ErrNoRows) || encryptedSecret == nil {
 		return "", false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("get TOTP secret: %w", err)
+		return "", false, fmt.Errorf("get encrypted TOTP secret: %w", err)
 	}
-	return *secret, true, nil
+	plaintext, err := store.keyring.Decrypt(*encryptedSecret)
+	if err != nil {
+		return "", false, fmt.Errorf("decrypt TOTP secret: %w", err)
+	}
+	return string(plaintext), true, nil
 }
 
 func generateBackupCodes(randomSource io.Reader, count int) ([]string, error) {

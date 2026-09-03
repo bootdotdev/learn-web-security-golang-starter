@@ -12,6 +12,7 @@ import (
 	"github.com/bootdotdev/learn-web-security/internal/httpx"
 	"github.com/bootdotdev/learn-web-security/internal/logging"
 	"github.com/bootdotdev/learn-web-security/internal/orders"
+	"github.com/bootdotdev/learn-web-security/internal/storage"
 	"github.com/bootdotdev/learn-web-security/internal/templates"
 	"github.com/bootdotdev/learn-web-security/internal/uploads"
 )
@@ -61,14 +62,15 @@ type Handler struct {
 	uploadStore         *uploads.Store
 	renderer            *templates.Renderer
 	logger              *logging.Logger
+	encryptionKeyring   *storage.Keyring
 	bulkImportDirectory string
 	maxUploadBytes      int64
 }
 
-func NewHandler(accountStore *accounts.Store, orderStore *orders.Store, uploadStore *uploads.Store, renderer *templates.Renderer, logger *logging.Logger, bulkImportDirectory string, maxUploadBytes int64) *Handler {
+func NewHandler(accountStore *accounts.Store, orderStore *orders.Store, uploadStore *uploads.Store, renderer *templates.Renderer, logger *logging.Logger, encryptionKeyring *storage.Keyring, bulkImportDirectory string, maxUploadBytes int64) *Handler {
 	return &Handler{
 		accountStore: accountStore, orderStore: orderStore, uploadStore: uploadStore, renderer: renderer,
-		logger: logger, bulkImportDirectory: bulkImportDirectory, maxUploadBytes: maxUploadBytes,
+		logger: logger, encryptionKeyring: encryptionKeyring, bulkImportDirectory: bulkImportDirectory, maxUploadBytes: maxUploadBytes,
 	}
 }
 
@@ -141,7 +143,7 @@ func (handler *Handler) ImportTaxDocuments(responseWriter http.ResponseWriter, r
 		handler.renderArchivePage(responseWriter, request, http.StatusBadRequest, current, false, 0, "Choose a ZIP archive.")
 		return
 	}
-	extractedArchive, err := uploads.ExtractTaxDocumentArchive(contents, handler.bulkImportDirectory)
+	extractedArchive, err := uploads.ExtractTaxDocumentArchive(handler.encryptionKeyring, contents, handler.bulkImportDirectory)
 	if err != nil {
 		if archiveError, ok := errors.AsType[*uploads.ArchiveImportError](err); ok {
 			handler.renderArchivePage(responseWriter, request, archiveError.StatusCode, current, false, 0, archiveError.Message)
@@ -182,9 +184,18 @@ func (handler *Handler) Order(responseWriter http.ResponseWriter, request *http.
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+	var shipping *orders.ShippingDetails
+	if order.ShippingDetailsEncrypted != nil {
+		decrypted, err := orders.DecryptShippingDetails(*order.ShippingDetailsEncrypted, handler.encryptionKeyring)
+		if err != nil {
+			handler.internalError(responseWriter, request, err)
+			return
+		}
+		shipping = &decrypted
+	}
 	handler.render(responseWriter, request, http.StatusOK, "support-order", orderPage{
 		Title: "Support Order #" + strconv.FormatInt(order.ID, 10), DisplayName: current.User.DisplayName,
-		IsAdmin: current.User.Role == "admin", Order: order, Items: items,
+		IsAdmin: current.User.Role == "admin", Order: order, Items: items, Shipping: shipping,
 	})
 }
 

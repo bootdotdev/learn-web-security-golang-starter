@@ -15,13 +15,17 @@ import (
 	"github.com/bootdotdev/learn-web-security/internal/integrations/pawpal"
 	"github.com/bootdotdev/learn-web-security/internal/logging"
 	"github.com/bootdotdev/learn-web-security/internal/orders"
+	"github.com/bootdotdev/learn-web-security/internal/storage"
 	"github.com/bootdotdev/learn-web-security/internal/templates"
 )
+
+const checkoutAdminNotes = "Awaiting PawPal payment."
 
 type pageView struct {
 	templates.Page
 	Items       []cart.Item
 	TotalCents  int64
+	CSRFToken   string
 	DisplayName string
 	Error       string
 }
@@ -29,6 +33,7 @@ type pageView struct {
 type processingPageView struct {
 	templates.Page
 	OrderID     int64
+	CSPNonce    string
 	DisplayName string
 }
 
@@ -36,20 +41,20 @@ type Handler struct {
 	cartStore        *cart.Store
 	orderStore       *orders.Store
 	accountStore     *accounts.Store
+	keyring          *storage.Keyring
 	renderer         *templates.Renderer
 	logger           *logging.Logger
-	pawPalAPIKey     string
 	fulfillmentDelay time.Duration
 }
 
-func NewHandler(cartStore *cart.Store, orderStore *orders.Store, accountStore *accounts.Store, renderer *templates.Renderer, logger *logging.Logger, pawPalAPIKey string, fulfillmentDelay time.Duration) *Handler {
+func NewHandler(cartStore *cart.Store, orderStore *orders.Store, accountStore *accounts.Store, keyring *storage.Keyring, renderer *templates.Renderer, logger *logging.Logger, fulfillmentDelay time.Duration) *Handler {
 	return &Handler{
 		cartStore:        cartStore,
 		orderStore:       orderStore,
 		accountStore:     accountStore,
+		keyring:          keyring,
 		renderer:         renderer,
 		logger:           logger,
-		pawPalAPIKey:     pawPalAPIKey,
 		fulfillmentDelay: fulfillmentDelay,
 	}
 }
@@ -123,8 +128,7 @@ func (handler *Handler) Submit(responseWriter http.ResponseWriter, request *http
 		handler.renderCheckoutError(responseWriter, request, http.StatusConflict, current, items, unavailableItem.Name+" is no longer available in the requested quantity. Update your cart before checking out.")
 		return
 	}
-	adminNotes := "PawPal redirect approved. Ship to " + shippingDetails.Name + ", " + shippingDetails.Address + ", " + shippingDetails.City + ", " + shippingDetails.Region + " " + shippingDetails.PostalCode + "."
-	order, err := handler.orderStore.CreateFromCart(request.Context(), current.User.ID, items, discountCents, adminNotes)
+	order, err := handler.orderStore.CreateFromCart(request.Context(), current.User.ID, items, discountCents, shippingDetails, checkoutAdminNotes, handler.keyring)
 	if errors.Is(err, orders.ErrInsufficientInventory) {
 		currentItems, listErr := handler.cartStore.ListItems(request.Context(), current.User.ID)
 		if listErr != nil {
@@ -138,20 +142,19 @@ func (handler *Handler) Submit(responseWriter http.ResponseWriter, request *http
 		handler.internalError(responseWriter, request, err)
 		return
 	}
-	_ = handler.logger.Event("checkout_completed", map[string]any{
+	_ = handler.logger.Event("checkout_started", map[string]any{
 		"userId":             current.User.ID,
 		"email":              current.User.Email,
 		"orderId":            order.ID,
 		"totalCents":         order.TotalCents,
-		"pawPalReference":    pawpal.CreateReference(order.ID, order.TotalCents, handler.pawPalAPIKey),
 		"shippingName":       shippingDetails.Name,
 		"shippingAddress":    shippingDetails.Address,
 		"shippingCity":       shippingDetails.City,
 		"shippingRegion":     shippingDetails.Region,
 		"shippingPostalCode": shippingDetails.PostalCode,
-		"adminNotes":         adminNotes,
+		"adminNotes":         checkoutAdminNotes,
 	})
-	http.Redirect(responseWriter, request, "/pawpal/processing/"+strconv.FormatInt(order.ID, 10), http.StatusFound)
+	http.Redirect(responseWriter, request, pawpal.CreateCheckoutURL(order.ID), http.StatusFound)
 }
 
 func (handler *Handler) Processing(responseWriter http.ResponseWriter, request *http.Request) {
@@ -176,6 +179,7 @@ func (handler *Handler) Processing(responseWriter http.ResponseWriter, request *
 	view := processingPageView{
 		Title:       "PawPal Processing",
 		OrderID:     order.ID,
+		CSPNonce:    httpx.CSPNonce(request.Context()),
 		DisplayName: current.User.DisplayName,
 	}
 	if err := handler.renderer.Render(responseWriter, http.StatusOK, "pawpal-processing", view); err != nil {
@@ -208,6 +212,7 @@ func (handler *Handler) renderPage(responseWriter http.ResponseWriter, statusCod
 		Title:       "Checkout",
 		Items:       items,
 		TotalCents:  cart.TotalCents(items),
+		CSRFToken:   current.Session.CSRFToken,
 		DisplayName: current.User.DisplayName,
 		Error:       errorMessage,
 	})

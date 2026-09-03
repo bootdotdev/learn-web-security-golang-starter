@@ -1,30 +1,27 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"log"
-	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
-	"time"
 )
 
-const fixedWindowProbe = `package httpserver
+const applicationProbe = `package httpserver
 
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/bootdotdev/learn-web-security/internal/database"
+	"github.com/bootdotdev/learn-web-security/internal/logging"
+	"github.com/bootdotdev/learn-web-security/internal/storage"
 )
 
 func TestLessonFixedWindowRateLimiter(t *testing.T) {
@@ -69,6 +66,92 @@ func TestLessonFixedWindowRateLimiter(t *testing.T) {
 		t.Fatal("allowance did not reset in a new fixed window")
 	}
 }
+
+func TestLessonApplicationGlobalLimiter(t *testing.T) {
+	application := newLessonApplication(t)
+
+	request := func(path, remoteAddress string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		httpRequest := httptest.NewRequest(http.MethodGet, path, nil)
+		httpRequest.RemoteAddr = remoteAddress
+		application.Handler.ServeHTTP(recorder, httpRequest)
+		return recorder
+	}
+
+	for requestNumber := range 100 {
+		response := request("/lesson-check-missing", "192.0.2.10:"+strconv.Itoa(1_000+requestNumber))
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("allowed request %d returned status %d", requestNumber+1, response.Code)
+		}
+		if response.Header().Get("RateLimit-Limit") != "100" {
+			t.Fatalf("allowed request %d did not report the global limit", requestNumber+1)
+		}
+	}
+
+	blocked := request("/lesson-check-missing", "192.0.2.10:1100")
+	if blocked.Code != http.StatusTooManyRequests || blocked.Header().Get("RateLimit-Remaining") != "0" {
+		t.Fatal("the application did not enforce the global allowance")
+	}
+	if retryAfter, err := strconv.Atoi(blocked.Header().Get("Retry-After")); err != nil || retryAfter <= 0 {
+		t.Fatal("the application did not report when the client can retry")
+	}
+
+	otherClient := request("/lesson-check-missing", "192.0.2.11:1000")
+	if otherClient.Code != http.StatusNotFound || otherClient.Header().Get("RateLimit-Limit") != "100" || otherClient.Header().Get("RateLimit-Remaining") != "99" {
+		t.Fatal("the application did not maintain a separate allowance for another client")
+	}
+
+	health := request("/health", "192.0.2.10:1101")
+	if health.Code != http.StatusOK || health.Header().Get("RateLimit-Limit") != "" {
+		t.Fatal("the health endpoint was not excluded from the global limiter")
+	}
+}
+
+func newLessonApplication(t *testing.T) *Application {
+	t.Helper()
+
+	repositoryRoot := filepath.Join("..", "..")
+	dataDirectory := t.TempDir()
+	databaseConnection, err := database.Open(t.Context(), filepath.Join(dataDirectory, "lesson-check.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = databaseConnection.Close() })
+	if err := database.Migrate(t.Context(), databaseConnection); err != nil {
+		t.Fatal(err)
+	}
+
+	logger, err := logging.Open(filepath.Join(dataDirectory, "lesson-check.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	var encryptionKey [32]byte
+	encryptionKey[0] = 1
+	keyring, err := storage.NewKeyring("v1", map[string][32]byte{"v1": encryptionKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	application, err := New(databaseConnection, logger, Options{
+		AppOrigin:               "http://localhost:3030",
+		MaxPublicProductResults: 50,
+		MaxRequestBodyBytes:     32 * 1024,
+		MaxUploadBytes:          1024 * 1024,
+		PawPalAPIKey:            "lesson-check",
+		EncryptionKeyring:       keyring,
+		DataDirectory:           dataDirectory,
+		FixtureDirectory:        filepath.Join(repositoryRoot, "data", "fixtures"),
+		TemplateDirectory:       filepath.Join(repositoryRoot, "web", "templates"),
+		PublicDirectory:         filepath.Join(repositoryRoot, "web", "public"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = application.Close() })
+	return application
+}
 `
 
 type result struct {
@@ -79,73 +162,28 @@ type result struct {
 }
 
 func main() {
-	fixedWindowBehavior := runFixedWindowProbe()
-	applicationOrigin, err := localApplicationOrigin()
-	if err != nil {
-		log.Fatal(err)
-	}
-	limitedClient, err := clientFrom("127.30.0.1")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer limitedClient.CloseIdleConnections()
-	otherClient, err := clientFrom("127.30.0.2")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer otherClient.CloseIdleConnections()
-
-	allAllowed := true
-	for range 100 {
-		response, requestErr := get(limitedClient, applicationOrigin+"/")
-		if requestErr != nil {
-			log.Fatal(requestErr)
-		}
-		allAllowed = allAllowed && response.StatusCode == http.StatusOK
-		response.Body.Close()
-	}
-	blocked, err := get(limitedClient, applicationOrigin+"/")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer blocked.Body.Close()
-	other, err := get(otherClient, applicationOrigin+"/")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer other.Body.Close()
-	health, err := get(limitedClient, applicationOrigin+"/health")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer health.Body.Close()
-
-	retryAfter, _ := strconv.Atoi(blocked.Header.Get("Retry-After"))
+	probePassed := runApplicationProbe()
 	writeResult(result{
-		FixedWindowBehavior: fixedWindowBehavior,
-		GlobalAllowanceEnforced: allAllowed && blocked.StatusCode == http.StatusTooManyRequests &&
-			blocked.Header.Get("RateLimit-Limit") == "100" &&
-			blocked.Header.Get("RateLimit-Remaining") == "0" && retryAfter > 0,
-		ClientIsolationMaintained: other.StatusCode == http.StatusOK &&
-			other.Header.Get("RateLimit-Limit") == "100" &&
-			other.Header.Get("RateLimit-Remaining") == "99",
-		HealthExcluded: health.StatusCode == http.StatusOK && health.Header.Get("RateLimit-Limit") == "",
+		FixedWindowBehavior:       probePassed,
+		GlobalAllowanceEnforced:   probePassed,
+		ClientIsolationMaintained: probePassed,
+		HealthExcluded:            probePassed,
 	})
 }
 
-func runFixedWindowProbe() bool {
+func runApplicationProbe() bool {
 	probePath := filepath.Join("internal", "httpserver", "lesson_global_limiter_test.go")
 	if _, err := os.Stat(probePath); err == nil {
 		log.Fatalf("temporary probe path already exists: %s", probePath)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		log.Fatal(err)
 	}
-	if err := os.WriteFile(probePath, []byte(fixedWindowProbe), 0o600); err != nil {
+	if err := os.WriteFile(probePath, []byte(applicationProbe), 0o600); err != nil {
 		log.Fatal(err)
 	}
 	defer os.Remove(probePath)
 
-	command := exec.Command("go", "test", "./internal/httpserver", "-run", "^TestLessonFixedWindowRateLimiter$", "-count=1")
+	command := exec.Command("go", "test", "./internal/httpserver", "-run", "^TestLesson", "-count=1")
 	command.Stdout = os.Stderr
 	command.Stderr = os.Stderr
 	err := command.Run()
@@ -157,46 +195,6 @@ func runFixedWindowProbe() bool {
 	}
 	log.Fatal(err)
 	return false
-}
-
-func localApplicationOrigin() (string, error) {
-	configuredOrigin, err := url.Parse(strings.TrimRight(os.Getenv("APP_ORIGIN"), "/"))
-	if err != nil {
-		return "", fmt.Errorf("parse application origin: %w", err)
-	}
-	if configuredOrigin.Scheme == "" || configuredOrigin.Port() == "" {
-		return "", errors.New("APP_ORIGIN must include a scheme and port")
-	}
-	return configuredOrigin.Scheme + "://" + net.JoinHostPort("127.0.0.1", configuredOrigin.Port()), nil
-}
-
-func clientFrom(sourceAddress string) (*http.Client, error) {
-	parsedAddress := net.ParseIP(sourceAddress)
-	if parsedAddress == nil {
-		return nil, fmt.Errorf("parse source address %q", sourceAddress)
-	}
-	dialer := &net.Dialer{LocalAddr: &net.TCPAddr{IP: parsedAddress}}
-	transport := &http.Transport{DialContext: dialer.DialContext}
-	return &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: transport,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}, nil
-}
-
-func get(client *http.Client, target string) (*http.Response, error) {
-	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
-	if err != nil {
-		return nil, err
-	}
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	_, _ = io.Copy(io.Discard, response.Body)
-	return response, nil
 }
 
 func writeResult(output result) {

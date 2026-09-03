@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -13,24 +14,28 @@ import (
 )
 
 const (
-	defaultPort             = 3030
-	defaultAttackerLabPort  = 4040
-	defaultAppOrigin        = "http://localhost:3030"
-	defaultDatabaseFilename = "bearly-secure.sqlite"
-	MaxRequestBodyBytes     = 32 * 1024
-	MaxUploadBytes          = 1024 * 1024
-	MaxPublicProductResults = 50
+	defaultPort                = 3030
+	defaultAttackerLabPort     = 4040
+	defaultAppOrigin           = "http://localhost:3030"
+	defaultDatabaseFilename    = "bearly-secure.sqlite"
+	MaxRequestBodyBytes        = 32 * 1024
+	MaxUploadBytes             = 1024 * 1024
+	MaxPublicProductResults    = 50
+	activeEncryptionVersionEnv = "DATA_ENCRYPTION_ACTIVE_VERSION"
+	encryptionKeyEnvPrefix     = "DATA_ENCRYPTION_KEY_"
 )
 
 type Config struct {
-	PawPalAPIKey            string
-	AppOrigin               string
-	Port                    int
-	DatabasePath            string
-	AcornFulfillmentDelay   time.Duration
-	MaxRequestBodyBytes     int64
-	MaxUploadBytes          int64
-	MaxPublicProductResults int
+	PawPalAPIKey               string
+	AppOrigin                  string
+	Port                       int
+	DatabasePath               string
+	AcornFulfillmentDelay      time.Duration
+	MaxRequestBodyBytes        int64
+	MaxUploadBytes             int64
+	MaxPublicProductResults    int
+	ActiveEncryptionKeyVersion string
+	EncryptionKeys             map[string][32]byte
 }
 
 type AttackerLabConfig struct {
@@ -63,20 +68,27 @@ func Parse(environment map[string]string, workingDirectory string) (Config, erro
 		return Config{}, err
 	}
 
+	activeEncryptionKeyVersion, encryptionKeys, err := parseOptionalEncryptionKeys(environment)
+	if err != nil {
+		return Config{}, err
+	}
+
 	databasePath := environment["DATABASE_URL"]
 	if databasePath == "" {
 		databasePath = filepath.Join(workingDirectory, "data", defaultDatabaseFilename)
 	}
 
 	return Config{
-		PawPalAPIKey:            "bs_test_pawpal_starter_key",
-		AppOrigin:               appOrigin,
-		Port:                    port,
-		DatabasePath:            databasePath,
-		AcornFulfillmentDelay:   acornFulfillmentDelay,
-		MaxRequestBodyBytes:     MaxRequestBodyBytes,
-		MaxUploadBytes:          MaxUploadBytes,
-		MaxPublicProductResults: MaxPublicProductResults,
+		PawPalAPIKey:               "bs_test_pawpal_starter_key",
+		AppOrigin:                  appOrigin,
+		Port:                       port,
+		DatabasePath:               databasePath,
+		AcornFulfillmentDelay:      acornFulfillmentDelay,
+		MaxRequestBodyBytes:        MaxRequestBodyBytes,
+		MaxUploadBytes:             MaxUploadBytes,
+		MaxPublicProductResults:    MaxPublicProductResults,
+		ActiveEncryptionKeyVersion: activeEncryptionKeyVersion,
+		EncryptionKeys:             encryptionKeys,
 	}, nil
 }
 
@@ -134,4 +146,77 @@ func parseDelay(value string) (time.Duration, error) {
 		return 0, errors.New("ACORN_FULFILLMENT_DELAY_MS is too large")
 	}
 	return time.Duration(milliseconds * float64(time.Millisecond)), nil
+}
+
+func parseOptionalEncryptionKeys(environment map[string]string) (string, map[string][32]byte, error) {
+	_, hasActiveVersion := environment[activeEncryptionVersionEnv]
+	hasEncryptionKey := false
+	for name := range environment {
+		if strings.HasPrefix(name, encryptionKeyEnvPrefix) {
+			hasEncryptionKey = true
+			break
+		}
+	}
+	if !hasActiveVersion && !hasEncryptionKey {
+		return "", nil, nil
+	}
+	return parseEncryptionKeys(environment)
+}
+
+func parseEncryptionKeys(environment map[string]string) (string, map[string][32]byte, error) {
+	configuredVersion := environment[activeEncryptionVersionEnv]
+	if configuredVersion == "" {
+		return "", nil, fmt.Errorf("missing required environment variable: %s", activeEncryptionVersionEnv)
+	}
+	activeVersion, err := normalizeEncryptionVersion(configuredVersion)
+	if err != nil {
+		return "", nil, err
+	}
+
+	keys := make(map[string][32]byte)
+	for name, value := range environment {
+		if !strings.HasPrefix(name, encryptionKeyEnvPrefix) {
+			continue
+		}
+		version, err := normalizeEncryptionVersion(strings.TrimPrefix(name, encryptionKeyEnvPrefix))
+		if err != nil {
+			return "", nil, err
+		}
+		if _, exists := keys[version]; exists {
+			return "", nil, fmt.Errorf("duplicate encryption key version: %s", version)
+		}
+		key, err := parseEncryptionKey(value, name)
+		if err != nil {
+			return "", nil, err
+		}
+		keys[version] = key
+	}
+	if _, exists := keys[activeVersion]; !exists {
+		return "", nil, fmt.Errorf("no encryption key configured for active version: %s", activeVersion)
+	}
+	return activeVersion, keys, nil
+}
+
+func parseEncryptionKey(value, name string) ([32]byte, error) {
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != 32 {
+		return [32]byte{}, fmt.Errorf("%s must be exactly 64 hexadecimal characters", name)
+	}
+	return [32]byte(decoded), nil
+}
+
+func normalizeEncryptionVersion(version string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(version))
+	if normalized == "" {
+		return "", fmt.Errorf("invalid encryption key version: %s", version)
+	}
+	for index, character := range normalized {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			continue
+		}
+		if character != '_' || index == 0 || index == len(normalized)-1 || normalized[index-1] == '_' {
+			return "", fmt.Errorf("invalid encryption key version: %s", version)
+		}
+	}
+	return normalized, nil
 }

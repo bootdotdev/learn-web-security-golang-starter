@@ -65,8 +65,6 @@ CREATE TABLE orders (
   total_cents INTEGER NOT NULL,
   admin_notes TEXT NOT NULL DEFAULT '',
   shipping_details_encrypted TEXT,
-  payment_reference TEXT,
-  payment_status TEXT CHECK (payment_status IS NULL OR payment_status = 'approved'),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

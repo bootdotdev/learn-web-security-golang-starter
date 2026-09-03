@@ -8,8 +8,6 @@ SELECT
   orders.total_cents,
   orders.admin_notes,
   orders.shipping_details_encrypted,
-  orders.payment_reference,
-  orders.payment_status,
   orders.created_at
 FROM orders
 JOIN users ON users.id = orders.user_id
@@ -26,8 +24,6 @@ SELECT
   orders.total_cents,
   orders.admin_notes,
   orders.shipping_details_encrypted,
-  orders.payment_reference,
-  orders.payment_status,
   orders.created_at
 FROM orders
 JOIN users ON users.id = orders.user_id
@@ -43,8 +39,6 @@ SELECT
   orders.total_cents,
   orders.admin_notes,
   orders.shipping_details_encrypted,
-  orders.payment_reference,
-  orders.payment_status,
   orders.created_at
 FROM orders
 JOIN users ON users.id = orders.user_id
@@ -69,12 +63,15 @@ INSERT INTO orders (
   status,
   total_cents,
   admin_notes,
-  shipping_details_encrypted,
-  payment_reference,
-  payment_status
+  shipping_details_encrypted
 )
-VALUES (?, 'paid', ?, ?, ?, ?, ?)
+VALUES (?, 'pending', ?, ?, ?)
 RETURNING id;
+
+-- name: ApprovePawPalOrder :execrows
+UPDATE orders
+SET status = 'paid'
+WHERE id = ? AND status = 'pending';
 
 -- name: DecrementProductInventory :execresult
 UPDATE products

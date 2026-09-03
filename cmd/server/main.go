@@ -58,6 +58,7 @@ func run(ctx context.Context) error {
 		PawPalAPIKey:            appConfig.PawPalAPIKey,
 		AcornFulfillmentDelay:   appConfig.AcornFulfillmentDelay,
 		DataDirectory:           filepath.Join(workingDirectory, "data"),
+		FixtureDirectory:        filepath.Join(workingDirectory, "data", "fixtures"),
 		TemplateDirectory:       filepath.Join(workingDirectory, "web", "templates"),
 		PublicDirectory:         filepath.Join(workingDirectory, "web", "public"),
 	})

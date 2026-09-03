@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/bootdotdev/learn-web-security/internal/accounts"
 	"github.com/bootdotdev/learn-web-security/internal/auth/mfa"
 	"github.com/bootdotdev/learn-web-security/internal/auth/passwords"
 	"github.com/bootdotdev/learn-web-security/internal/auth/sessions"
@@ -131,7 +132,7 @@ func (handler *authHandler) TOTPLogin(responseWriter http.ResponseWriter, reques
 			handler.internalError(responseWriter, request, err)
 			return
 		}
-		_ = handler.logger.Event("login_attempt", map[string]any{
+		handler.logAuthenticationEvent(request, "login_attempt", map[string]any{
 			"email":         user.Email,
 			"userId":        user.ID,
 			"success":       false,
@@ -157,7 +158,7 @@ func (handler *authHandler) TOTPLogin(responseWriter http.ResponseWriter, reques
 		handler.internalError(responseWriter, request, err)
 		return
 	}
-	_ = handler.logger.Event("login_attempt", map[string]any{
+	handler.logAuthenticationEvent(request, "login_attempt", map[string]any{
 		"email":     user.Email,
 		"userId":    user.ID,
 		"role":      user.Role,
@@ -193,13 +194,31 @@ func (handler *authHandler) RecoverMFA(responseWriter http.ResponseWriter, reque
 		handler.invalidForm(responseWriter)
 		return
 	}
+	email = accounts.NormalizeEmail(email)
 	backupCode = strings.TrimSpace(backupCode)
 	user, found, err := handler.accounts.FindUserByEmail(request.Context(), email)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+	recentFailures, err := handler.mfa.CountRecentRecoveryFailures(request.Context(), email)
+	if err != nil {
+		handler.internalError(responseWriter, request, err)
+		return
+	}
+	if recentFailures >= 5 {
+		handler.logMFARecovery(email, nullableUserID(user, found), false, "too many recovery attempts")
+		if err := handler.renderMFARecovery(responseWriter, http.StatusTooManyRequests, "Too many recovery attempts. Try again later."); err != nil {
+			handler.internalError(responseWriter, request, err)
+		}
+		return
+	}
 	if !found || !passwords.Verify(password, user.PasswordHash) {
+		userID := nullableInt64(user.ID, found)
+		if err := handler.mfa.RecordRecoveryAttempt(request.Context(), email, userID, false); err != nil {
+			handler.internalError(responseWriter, request, err)
+			return
+		}
 		handler.logMFARecovery(email, nullableUserID(user, found), false, loginFailureReason(found))
 		if err := handler.renderMFARecovery(responseWriter, http.StatusUnauthorized, "Invalid recovery details."); err != nil {
 			handler.internalError(responseWriter, request, err)
@@ -212,6 +231,10 @@ func (handler *authHandler) RecoverMFA(responseWriter http.ResponseWriter, reque
 		return
 	}
 	if !consumed {
+		if err := handler.mfa.RecordRecoveryAttempt(request.Context(), email, &user.ID, false); err != nil {
+			handler.internalError(responseWriter, request, err)
+			return
+		}
 		handler.logMFARecovery(user.Email, user.ID, false, "backup code rejected")
 		if err := handler.renderMFARecovery(responseWriter, http.StatusUnauthorized, "Invalid recovery details."); err != nil {
 			handler.internalError(responseWriter, request, err)
@@ -229,6 +252,10 @@ func (handler *authHandler) RecoverMFA(responseWriter http.ResponseWriter, reque
 	}
 	session, err := handler.accounts.CreateSession(request.Context(), user.ID)
 	if err != nil {
+		handler.internalError(responseWriter, request, err)
+		return
+	}
+	if err := handler.mfa.RecordRecoveryAttempt(request.Context(), user.Email, &user.ID, true); err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
@@ -252,13 +279,14 @@ func (handler *authHandler) RequestPasswordReset(responseWriter http.ResponseWri
 		handler.invalidForm(responseWriter)
 		return
 	}
+	email = accounts.NormalizeEmail(email)
 	user, found, err := handler.accounts.FindUserByEmail(request.Context(), email)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
 	if !found {
-		_ = handler.logger.Event("password_reset_request", map[string]any{
+		handler.logAuthenticationEvent(request, "password_reset_request", map[string]any{
 			"email":         email,
 			"success":       false,
 			"failureReason": "email not found",
@@ -278,7 +306,7 @@ func (handler *authHandler) RequestPasswordReset(responseWriter http.ResponseWri
 	if err == nil && appURL.Hostname() == "localhost" {
 		fmt.Printf("Bear Mail to %s:\nReset your password: %s\n", email, resetLink)
 	}
-	_ = handler.logger.Event("password_reset_request", map[string]any{
+	handler.logAuthenticationEvent(request, "password_reset_request", map[string]any{
 		"email":      user.Email,
 		"userId":     user.ID,
 		"success":    true,
@@ -435,4 +463,11 @@ func verificationRestartLoginPath(returnTo string) string {
 		loginPath += "&returnTo=" + url.QueryEscape(safePath)
 	}
 	return loginPath
+}
+
+func nullableInt64(value int64, include bool) *int64 {
+	if !include {
+		return nil
+	}
+	return &value
 }

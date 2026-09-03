@@ -19,6 +19,7 @@ type productCard struct {
 	Product
 	OutOfStock         bool
 	AllInventoryInCart bool
+	CSRFToken          string
 }
 
 type storefrontView struct {
@@ -50,6 +51,7 @@ type productView struct {
 type currentUserView struct {
 	ID          int64
 	DisplayName string
+	CSRFToken   string
 	IsAdmin     bool
 }
 
@@ -91,7 +93,7 @@ func (handler *Handler) Storefront(responseWriter http.ResponseWriter, request *
 	view := storefrontView{
 		Title:    "Bearly Secure",
 		Current:  current,
-		Products: makeProductCards(products, cartQuantities),
+		Products: makeProductCards(products, cartQuantities, csrfToken(current)),
 	}
 	if err := handler.renderer.Render(responseWriter, http.StatusOK, "storefront", view); err != nil {
 		handler.renderFailure(responseWriter, request, err)
@@ -127,7 +129,7 @@ func (handler *Handler) Search(responseWriter http.ResponseWriter, request *http
 		Current:       current,
 		Query:         query,
 		ResultSummary: resultSummary,
-		Products:      makeProductCards(products, cartQuantities),
+		Products:      makeProductCards(products, cartQuantities, csrfToken(current)),
 		HasProducts:   len(products) > 0,
 	}
 	if err := handler.renderer.Render(responseWriter, http.StatusOK, "search", view); err != nil {
@@ -225,8 +227,16 @@ func (handler *Handler) requestContext(responseWriter http.ResponseWriter, reque
 	return &currentUserView{
 		ID:          currentSession.User.ID,
 		DisplayName: currentSession.User.DisplayName,
+		CSRFToken:   currentSession.Session.CSRFToken,
 		IsAdmin:     currentSession.User.Role == "admin",
 	}, cartQuantities, true
+}
+
+func csrfToken(current *currentUserView) string {
+	if current == nil {
+		return ""
+	}
+	return current.CSRFToken
 }
 
 func makeReviewViews(reviews []Review, current *currentUserView) []reviewView {
@@ -241,7 +251,7 @@ func makeReviewViews(reviews []Review, current *currentUserView) []reviewView {
 	return viewReviews
 }
 
-func makeProductCards(products []Product, cartQuantities map[int64]int64) []productCard {
+func makeProductCards(products []Product, cartQuantities map[int64]int64, csrfToken string) []productCard {
 	cards := make([]productCard, 0, len(products))
 	for _, product := range products {
 		remainingInventory := max(int64(0), product.InventoryCount-cartQuantities[product.ID])
@@ -249,6 +259,7 @@ func makeProductCards(products []Product, cartQuantities map[int64]int64) []prod
 			Product:            product,
 			OutOfStock:         product.InventoryCount == 0,
 			AllInventoryInCart: remainingInventory == 0 && product.InventoryCount != 0,
+			CSRFToken:          csrfToken,
 		})
 	}
 	return cards

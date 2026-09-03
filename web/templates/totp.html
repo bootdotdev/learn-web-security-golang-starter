@@ -46,6 +46,7 @@
   Your account requires an authenticator code when you log in.
 </p>
 <form method="post" action="/account/totp/disable" class="account-form">
+  <input name="csrfToken" type="hidden" value="{{.CSRFToken}}" />
   <p>
     Turning off two-step verification also invalidates your remaining backup
     codes.

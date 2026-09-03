@@ -22,9 +22,12 @@ func Verify(password, encodedHash string) bool {
 	if utf8.RuneCountInString(password) > MaxLength {
 		return false
 	}
+	expectedHash, ok := decodeLegacyHash(encodedHash)
+	if !ok {
+		return false
+	}
 	candidateHash := sha256.Sum256([]byte(password))
-	expectedHash, err := hex.DecodeString(encodedHash)
-	return err == nil && subtle.ConstantTimeCompare(candidateHash[:], expectedHash) == 1
+	return subtle.ConstantTimeCompare(candidateHash[:], expectedHash) == 1
 }
 
 func NeedsRehash(string) bool {

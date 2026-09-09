@@ -216,5 +216,5 @@ func isRuntimeDocumentPath(uploadDirectory, path string) bool {
 	if err != nil {
 		return false
 	}
-	return relativePath != "" && relativePath != ".." && !strings.HasPrefix(relativePath, ".."+string(filepath.Separator))
+	return relativePath != "." && relativePath != ".." && !strings.HasPrefix(relativePath, ".."+string(filepath.Separator))
 }

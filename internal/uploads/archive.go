@@ -163,7 +163,7 @@ func isIgnoredArchiveEntry(entryName string) bool {
 
 func DiscardExtractedTaxDocumentArchive(archive ExtractedTaxDocumentArchive) error {
 	relativePath, err := filepath.Rel(archive.extractionDirectory, archive.ImportDirectory)
-	if err != nil || relativePath == "" || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || strings.Contains(relativePath, string(filepath.Separator)) || filepath.IsAbs(relativePath) {
+	if err != nil || relativePath == "." || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || strings.Contains(relativePath, string(filepath.Separator)) || filepath.IsAbs(relativePath) {
 		return fmt.Errorf("refuse to remove path outside the import directory: %s", archive.ImportDirectory)
 	}
 	if err := os.RemoveAll(archive.ImportDirectory); err != nil {

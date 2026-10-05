@@ -9,17 +9,23 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"time"
 
+	"github.com/bootdotdev/learn-web-security/internal/auth/passwords"
+	"github.com/bootdotdev/learn-web-security/internal/database"
+	"github.com/bootdotdev/learn-web-security/internal/httpserver"
+	"github.com/bootdotdev/learn-web-security/internal/logging"
+	"github.com/bootdotdev/learn-web-security/internal/storage"
 	"github.com/pquerna/otp/totp"
 )
 
 const (
-	applicationOrigin = "http://localhost:3030"
+	applicationOrigin = "http://bearly-secure.test"
 	seededTOTPSecret  = "KXDYU6DRQPRQXLPY236SJJXPNGHQJVUF"
 )
 
@@ -42,7 +48,10 @@ type requestObservation struct {
 type logEntry map[string]any
 
 func main() {
-	observabilityResult, err := checkAuthenticationObservability(context.Background(), applicationOrigin)
+	resultOutput := os.Stdout
+	os.Stdout = os.Stderr
+	observabilityResult, err := runIsolatedProbe(context.Background())
+	os.Stdout = resultOutput
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -51,24 +60,80 @@ func main() {
 	}
 }
 
-func checkAuthenticationObservability(ctx context.Context, origin string) (checkResult, error) {
-	logPath := filepath.Join("data", "bearly-secure.log")
+func runIsolatedProbe(ctx context.Context) (checkResult, error) {
+	projectRoot, err := os.Getwd()
+	if err != nil {
+		return checkResult{}, fmt.Errorf("get project root: %w", err)
+	}
+	runtimeDirectory, err := os.MkdirTemp("", "bearly-secure-auth-observability-")
+	if err != nil {
+		return checkResult{}, fmt.Errorf("create observability-check directory: %w", err)
+	}
+	defer os.RemoveAll(runtimeDirectory)
+
+	databaseConnection, err := database.Open(ctx, filepath.Join(runtimeDirectory, "lesson-check.sqlite"))
+	if err != nil {
+		return checkResult{}, err
+	}
+	defer databaseConnection.Close()
+	if err := database.Migrate(ctx, databaseConnection); err != nil {
+		return checkResult{}, err
+	}
+	passwordHash, err := passwords.Hash("password123")
+	if err != nil {
+		return checkResult{}, err
+	}
+	if _, err := databaseConnection.ExecContext(ctx, `
+		INSERT INTO users (email, display_name, role, password_hash, totp_secret)
+		VALUES ('mabel@example.com', 'Mabel Pines', 'customer', ?, NULL),
+		       ('wendy@example.com', 'Wendy Corduroy', 'customer', ?, ?)
+	`, passwordHash, passwordHash, seededTOTPSecret); err != nil {
+		return checkResult{}, fmt.Errorf("seed observability-check users: %w", err)
+	}
+
+	logPath := filepath.Join(runtimeDirectory, "lesson-check.log")
+	appLogger, err := logging.Open(logPath)
+	if err != nil {
+		return checkResult{}, err
+	}
+	defer appLogger.Close()
+	var encryptionKey [32]byte
+	encryptionKey[0] = 1
+	encryptionKeyring, err := storage.NewKeyring("v1", map[string][32]byte{"v1": encryptionKey})
+	if err != nil {
+		return checkResult{}, err
+	}
+	application, err := httpserver.New(databaseConnection, appLogger, httpserver.Options{
+		AppOrigin:               applicationOrigin,
+		MaxPublicProductResults: 50,
+		MaxRequestBodyBytes:     32 * 1024,
+		MaxUploadBytes:          1024 * 1024,
+		PawPalAPIKey:            "lesson-check",
+		EncryptionKeyring:       encryptionKeyring,
+		DataDirectory:           runtimeDirectory,
+		FixtureDirectory:        filepath.Join(projectRoot, "data", "fixtures"),
+		TemplateDirectory:       filepath.Join(projectRoot, "web", "templates"),
+		PublicDirectory:         filepath.Join(projectRoot, "web", "public"),
+	})
+	if err != nil {
+		return checkResult{}, err
+	}
+	defer application.Close()
+	return checkAuthenticationObservability(ctx, application.Handler, logPath)
+}
+
+func checkAuthenticationObservability(ctx context.Context, applicationHandler http.Handler, logPath string) (checkResult, error) {
 	logOffset, err := logSize(logPath)
 	if err != nil {
 		return checkResult{}, err
 	}
 
-	httpClient := &http.Client{
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
 	clientSuppliedRequestID := "client-supplied-request-id"
-	firstHealth, err := get(ctx, httpClient, origin+"/health", map[string]string{"X-Request-ID": clientSuppliedRequestID})
+	firstHealth, err := get(ctx, applicationHandler, "/health", map[string]string{"X-Request-ID": clientSuppliedRequestID})
 	if err != nil {
 		return checkResult{}, err
 	}
-	secondHealth, err := get(ctx, httpClient, origin+"/health", nil)
+	secondHealth, err := get(ctx, applicationHandler, "/health", nil)
 	if err != nil {
 		return checkResult{}, err
 	}
@@ -77,21 +142,21 @@ func checkAuthenticationObservability(ctx context.Context, origin string) (check
 	knownEmail := "mabel@example.com"
 	knownPassword := "password123"
 	incorrectPassword := "observability-incorrect-password"
-	unknownLogin, err := postForm(ctx, httpClient, origin+"/login", url.Values{
+	unknownLogin, err := postForm(ctx, applicationHandler, "/login", url.Values{
 		"email":    {unknownEmail},
 		"password": {incorrectPassword},
 	}, nil)
 	if err != nil {
 		return checkResult{}, err
 	}
-	knownFailedLogin, err := postForm(ctx, httpClient, origin+"/login", url.Values{
+	knownFailedLogin, err := postForm(ctx, applicationHandler, "/login", url.Values{
 		"email":    {knownEmail},
 		"password": {incorrectPassword},
 	}, nil)
 	if err != nil {
 		return checkResult{}, err
 	}
-	successfulLogin, err := postForm(ctx, httpClient, origin+"/login", url.Values{
+	successfulLogin, err := postForm(ctx, applicationHandler, "/login", url.Values{
 		"email":    {knownEmail},
 		"password": {knownPassword},
 	}, nil)
@@ -100,7 +165,7 @@ func checkAuthenticationObservability(ctx context.Context, origin string) (check
 	}
 
 	totpEmail := "wendy@example.com"
-	totpPasswordStep, err := postForm(ctx, httpClient, origin+"/login", url.Values{
+	totpPasswordStep, err := postForm(ctx, applicationHandler, "/login", url.Values{
 		"email":    {totpEmail},
 		"password": {knownPassword},
 	}, nil)
@@ -112,7 +177,7 @@ func checkAuthenticationObservability(ctx context.Context, origin string) (check
 		return checkResult{}, fmt.Errorf("TOTP password step did not set a challenge cookie")
 	}
 	invalidTOTPCode := "not-a-code"
-	failedTOTPLogin, err := postForm(ctx, httpClient, origin+"/login/totp", url.Values{
+	failedTOTPLogin, err := postForm(ctx, applicationHandler, "/login/totp", url.Values{
 		"mfaCode": {invalidTOTPCode},
 	}, []*http.Cookie{challengeCookie})
 	if err != nil {
@@ -122,21 +187,21 @@ func checkAuthenticationObservability(ctx context.Context, origin string) (check
 	if err != nil {
 		return checkResult{}, fmt.Errorf("generate seeded TOTP code: %w", err)
 	}
-	successfulTOTPLogin, err := postForm(ctx, httpClient, origin+"/login/totp", url.Values{
+	successfulTOTPLogin, err := postForm(ctx, applicationHandler, "/login/totp", url.Values{
 		"mfaCode": {validTOTPCode},
 	}, []*http.Cookie{challengeCookie})
 	if err != nil {
 		return checkResult{}, err
 	}
 
-	knownResetRequest, err := postForm(ctx, httpClient, origin+"/password-reset", url.Values{
+	knownResetRequest, err := postForm(ctx, applicationHandler, "/password-reset", url.Values{
 		"email": {knownEmail},
 	}, nil)
 	if err != nil {
 		return checkResult{}, err
 	}
 	unknownResetEmail := "observability-reset-unknown@example.com"
-	unknownResetRequest, err := postForm(ctx, httpClient, origin+"/password-reset", url.Values{
+	unknownResetRequest, err := postForm(ctx, applicationHandler, "/password-reset", url.Values{
 		"email": {unknownResetEmail},
 	}, nil)
 	if err != nil {
@@ -204,19 +269,19 @@ func checkAuthenticationObservability(ctx context.Context, origin string) (check
 	}, nil
 }
 
-func get(ctx context.Context, httpClient *http.Client, endpoint string, headers map[string]string) (requestObservation, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+func get(ctx context.Context, applicationHandler http.Handler, endpoint string, headers map[string]string) (requestObservation, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, applicationOrigin+endpoint, nil)
 	if err != nil {
 		return requestObservation{}, fmt.Errorf("create GET request for %s: %w", endpoint, err)
 	}
 	for name, value := range headers {
 		request.Header.Set(name, value)
 	}
-	return observeResponse(httpClient.Do(request))
+	return serve(applicationHandler, request)
 }
 
-func postForm(ctx context.Context, httpClient *http.Client, endpoint string, form url.Values, cookies []*http.Cookie) (requestObservation, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBufferString(form.Encode()))
+func postForm(ctx context.Context, applicationHandler http.Handler, endpoint string, form url.Values, cookies []*http.Cookie) (requestObservation, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, applicationOrigin+endpoint, bytes.NewBufferString(form.Encode()))
 	if err != nil {
 		return requestObservation{}, fmt.Errorf("create POST request for %s: %w", endpoint, err)
 	}
@@ -228,13 +293,14 @@ func postForm(ctx context.Context, httpClient *http.Client, endpoint string, for
 	for _, cookie := range cookies {
 		request.AddCookie(cookie)
 	}
-	return observeResponse(httpClient.Do(request))
+	return serve(applicationHandler, request)
 }
 
-func observeResponse(response *http.Response, err error) (requestObservation, error) {
-	if err != nil {
-		return requestObservation{}, err
-	}
+func serve(applicationHandler http.Handler, request *http.Request) (requestObservation, error) {
+	request.RemoteAddr = "192.0.2.10:12345"
+	recorder := httptest.NewRecorder()
+	applicationHandler.ServeHTTP(recorder, request)
+	response := recorder.Result()
 	defer response.Body.Close()
 	if _, err := io.Copy(io.Discard, response.Body); err != nil {
 		return requestObservation{}, fmt.Errorf("read response body: %w", err)

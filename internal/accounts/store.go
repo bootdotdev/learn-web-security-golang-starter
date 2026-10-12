@@ -190,6 +190,11 @@ func (store *Store) CurrentSession(ctx context.Context, token string) (CurrentSe
 		}
 		return CurrentSession{}, false, fmt.Errorf("find session: %w", err)
 	}
+
+	if row.RevokedAt != nil {
+		return CurrentSession{}, false, nil
+	}
+	
 	expiresAt, err := time.Parse(time.RFC3339, row.ExpiresAt)
 	if err != nil || !store.now().Before(expiresAt) {
 		return CurrentSession{}, false, nil

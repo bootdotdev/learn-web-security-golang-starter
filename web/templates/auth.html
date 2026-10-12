@@ -165,9 +165,14 @@
   <p class="error">{{.Error}}</p>
   {{end}}{{if .ShowConfirmation}}
   <p class="confirmation">
+    If an account exists for that email, Bear Mail will send a reset link
+    shortly.
+  </p>
+  {{if .ResetLink}}
+  <p class="confirmation">
     Starter reset link: <a href="{{.ResetLink}}">{{.ResetLink}}</a>
   </p>
-  {{end -}}
+  {{end}}{{end -}}
 </div>
 <form method="post" action="/password-reset" class="auth-form">
   <label

@@ -38,6 +38,13 @@
           autocomplete="email"
           value="{{.Current.User.Email}}"
           required /></label
+      ><label
+        >Password<input
+          name="currentPassword"
+          type="password"
+          autocomplete="current-password"
+          maxlength="128"
+          required /></label
       ><button type="submit">Change email</button>
     </form>
   </article>

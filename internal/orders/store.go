@@ -45,7 +45,7 @@ func NewStore(database *sql.DB) *Store {
 	return &Store{database: database, queries: dbgen.New(database)}
 }
 
-func (store *Store) CreateFromCart(ctx context.Context, userID int64, cartItems []cart.Item, discountCents int64, shippingDetails ShippingDetails, adminNotes string, keyring *storage.Keyring) (Order, error) {
+func (store *Store) CreateFromCart(ctx context.Context, userID int64, cartItems []cart.Item, shippingDetails ShippingDetails, adminNotes string, keyring *storage.Keyring) (Order, error) {
 	encryptedShippingDetails, err := EncryptShippingDetails(shippingDetails, keyring)
 	if err != nil {
 		return Order{}, err
@@ -54,7 +54,6 @@ func (store *Store) CreateFromCart(ctx context.Context, userID int64, cartItems 
 	for _, cartItem := range cartItems {
 		totalCents += cartItem.LineTotalCents
 	}
-	totalCents -= discountCents
 	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
 		return Order{}, fmt.Errorf("begin order transaction: %w", err)

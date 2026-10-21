@@ -3,6 +3,7 @@ package cart
 import (
 	"math"
 	"net/http"
+	"regexp"
 	"strconv"
 
 	"github.com/bootdotdev/learn-web-security/internal/accounts"
@@ -186,7 +187,16 @@ func makeItemViews(items []Item) []itemView {
 	return viewItems
 }
 
+var valuePattern = regexp.MustCompile(`^[0]$|^[1-9]{0,2}$`)
+
+func isValidDoubleDigit(value string) bool {
+	return valuePattern.MatchString(value)
+}
+
 func parseQuantity(value string, minimum int64) (int64, bool) {
+	if !isValidDoubleDigit(value) {
+		return 0, false
+	}
 	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed != math.Trunc(parsed) {
 		return 0, false

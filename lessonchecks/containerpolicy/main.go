@@ -79,10 +79,44 @@ func validRuntimeStage(runtimeStage string) bool {
 		"/out/bearly-secure",
 		"/out/bearly-attacker-lab",
 		"attacker-lab ./attacker-lab",
-		"data/uploads/mystery-shack-tax-exemption.pdf ./data/uploads/mystery-shack-tax-exemption.pdf",
 		"web ./web",
 		`cmd ["./bearly-secure"]`,
-	) && !strings.Contains(runtimeStage, "copy . .")
+	) && copiesRuntimeFile(runtimeStage, "data/uploads/mystery-shack-tax-exemption.pdf") && !strings.Contains(runtimeStage, "copy . .")
+}
+
+func copiesRuntimeFile(runtimeStage, filename string) bool {
+	workdir := "/"
+	for line := range strings.SplitSeq(runtimeStage, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "workdir" {
+			if path.IsAbs(fields[1]) {
+				workdir = path.Clean(fields[1])
+			} else {
+				workdir = path.Join(workdir, fields[1])
+			}
+		}
+		if len(fields) < 3 || fields[0] != "copy" {
+			continue
+		}
+		args := fields[1:]
+		for len(args) > 0 && strings.HasPrefix(args[0], "--") {
+			args = args[1:]
+		}
+		if len(args) != 2 || path.Clean(args[0]) != filename {
+			continue
+		}
+		destination := args[1]
+		if !path.IsAbs(destination) {
+			destination = path.Join(workdir, destination)
+		}
+		if strings.HasSuffix(args[1], "/") {
+			destination = path.Join(destination, path.Base(filename))
+		}
+		if path.Clean(destination) == path.Join("/app", filename) {
+			return true
+		}
+	}
+	return false
 }
 
 func unprivilegedRuntime(runtimeStage string) bool {
